@@ -1,0 +1,14 @@
+# Build output
+cmake-build-*/
+
+# IDE
+.idea/
+
+# Agent tooling
+.superpowers/
+
+# Design docs (kept out of the mod repo)
+docs/
+
+# Game install symlink (points to the Steam install, not source)
+AbioticFactor/AbioticFactor

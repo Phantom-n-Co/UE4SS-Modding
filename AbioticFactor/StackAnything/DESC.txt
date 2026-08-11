@@ -1,0 +1,94 @@
+[center][size=6][b]StackAnything[/b][/size][/center]
+
+[center]Modify any items to stack to any amount you wish, be it furniture, fish, deployable, or anything else. Fully configurable via regular expressions.[/center]
+
+[size=5][b]Requirements[/b][/size]
+UE4SS 1.21.0 or above.
+
+[size=5][b]Installation[/b][/size]
+[list=1]
+[*]Extract the StackAnything zip into [font=courier]../ue4ss/Mods/[/font][/*]
+[*]Launch the game[/*]
+[/list]
+[size=5][b]Configuration[/b][/size]
+Edit [font=courier]Mods/StackAnything/config.lua[/font].
+
+On the first run (or if [font=courier]config.lua[/font] is missing or empty) the mod writes a default config covering the built-in item categories, generated from the built-in defaults.
+Delete [font=courier]config.lua[/font] and restart to regenerate the defaults.
+Edit [font=courier]config.lua[/font] to customize; it is never overwritten while it exists.
+
+The config maps regular expressions to max stack sizes. Longer (more specific) patterns win; items not matched by any pattern keep their vanilla stack size.
+
+[code]return {
+  ["fish_.+"] = 20,       -- all fish
+  [".*[Cc]hair.*"] = 2,   -- any chair
+  ["paintbucket"] = 10,   -- exact match
+}[/code]
+
+The basics: [font=courier].[/font] matches any single character, [font=courier]+[/font] one or more of the preceding, [font=courier]*[/font] zero or more, and [font=courier][Cc][/font] matches any character in the class.
+Regular expressions support many more constructs - for a full reference see [url=https://regex101.com/]regex101[/url] or [url=https://regexr.com/]RegExr[/url].
+
+[size=5][b]Safe Stacking[/b][/size]
+
+Stacking is always safe, even for items that normally duplicate or lose data when merged:
+
+[size=4][b]Fluid Containers[/b][/size]
+
+Fillable fluid containers (bottles, buckets, pots, soups, etc.) can be stacked without any fluid or food duplication.
+
+Stacking them is safe because the mod auto-splits a stack whenever its liquid state changes:
+[list]
+[*][b]Filling[/b] - one fill cost only fills [u]one[/u] container. The single filled container moves to a free slot (or joins an existing identical stack); the rest of the stack stays empty. If no slot is available the fill is reverted and the container's fluid is refunded, so nothing is duplicated or lost.[/*]
+[*][b]Emptying[/b] - only one container drains. The rest of the stack keeps its fluid and stays in your hand, ready to empty again. The single drained container moves out to a free slot (or an existing identical stack).[/*]
+[*][b]Stacking rules[/b] - drag-and-drop and shift-click will not merge containers with different liquid states (filled vs empty, or different liquids); identical containers merge normally. Inventory sort groups containers by their liquid state so filled and empty ones never combine.[/*]
+[/list]
+
+Batteries and laser cells keep their vanilla stack-charge behavior.
+
+[size=4][b]Texture-Variant Items[/b][/size]
+
+Paintings, TVs, arcade machines, and rare fish share a base item row, but each instance carries its own texture variant (different painting art, TV channel, arcade game, or fish variant). Stacking them is safe because the mod treats each variant as a distinct item:
+[list]
+[*][b]Stacking rules[/b] - drag-and-drop and shift-click will not merge two items of the same row that have different texture variants (or a base item with a variant). Identical variants merge normally.[/*]
+[*][b]Sorting[/b] - inventory sort groups items by their variant, so different variants never combine while identical ones still do.[/*]
+[/list]
+
+Yes, this also applies to fish caught from fishing.
+
+[size=4][b]Upgrade Bench[/b][/size]
+
+Stacked items can be placed into the upgrade bench and upgraded in batches:
+[list]
+[*][b]Costs[/b] - upgrade requirements scale with the inserted stack size, so upgrading [i]N[/i] items costs [i]N[/i] times each required item.[/*]
+[*][b]Display[/b] - the upgrade screen shows the scaled requirements and availability.[/*]
+[*][b]Batch upgrades[/b] - the entire inserted stack upgrades at once after the scaled costs are paid.[/*]
+[/list]
+
+[size=5][b]Finding Item IDs[/b][/size]
+
+To find the item IDs used in the config patterns, the mod can dump every item it knows about:
+[list]
+[*]Open [font=courier]Mods/StackAnything/Scripts/main.lua[/font][/*]
+[*]Set [font=courier]DUMP_ITEMS = true[/font] at the top[/*]
+[*]Restart the game[/*]
+[*]Read [font=courier]Mods/StackAnything/item_dump.lua[/font] - it lists every item's ID (row name), display name, current stack size, and more[/*]
+[*]Set [font=courier]DUMP_ITEMS = false[/font] and restart to stop dumping[/*]
+[/list]
+
+[size=5][b]Default Overrides[/b][/size]
+
+[code]Category                  Stack Size
+--------                  ----------
+Fish                      20
+Food & soups              20
+Collectables              20
+Lore & unsorted           20
+Fluid containers          10
+Furniture & storage       10
+Deployable variants       10
+Lighting                  5
+Paintings & posters       5
+Noisy (TVs, arcades)      5
+Crafting benches          5
+Electric                  5
+Misc deployable          5[/code]

@@ -1,0 +1,34 @@
+[center][size=6][b]RandomTweaks[/b][/size][/center]
+
+[center]A handful of quality-of-life tweaks: instant butchering, a wish-list stocking top-up for the Wishing Shelf, and configurable player stat adjustments.[/center]
+
+[size=5][b]Requirements[/b][/size]
+UE4SS 1.21.0 or above.
+
+[size=5][b]Installation[/b][/size]
+[list=1]
+[*]Extract the RandomTweaks zip into [font=courier]../ue4ss/Mods/[/font][/*]
+[*]Launch the game[/*]
+[/list]
+
+[size=5][b]Configuration[/b][/size]
+Edit [font=courier]Mods/RandomTweaks/config.lua[/font].
+
+On the first run the mod writes a default config. Delete [font=courier]config.lua[/font] and restart to regenerate it; it is never overwritten while it exists. Remove a line or set it to [font=courier]nil[/font] to skip that tweak.
+
+[size=5][b]Features[/b][/size]
+
+[size=4][b]Instant Butcher[/b][/size]
+Every damage event with a valid damage type gibs the target instantly.
+
+[size=4][b]Wishing Shelf Top-Up[/b][/size]
+When the Wishing Shelf spawns gifts, a stocked stocking slot that already holds the same item as the shelf slot is topped up to its max stack instead of being left alone. The amount is rolled from the same quantity range the shelf uses, and items gated behind world flags stay gated.
+
+[size=4][b]Player Tweaks[/b][/size]
+Adjustable player stats, each independent:
+[list]
+[*][b]Movement[/b] - walkSpeed, sprintSpeed, ladderClimbSpeed, jumpHeight.[/*]
+[*][b]Stamina[/b] - staminaDrainRate, staminaRegainRate.[/*]
+[*][b]Comfort[/b] - interactionRange.[/*]
+[*][b]Lighting[/b] - lightIntensity, lanternIntensity, disableWatchLight.[/*]
+[/list]
