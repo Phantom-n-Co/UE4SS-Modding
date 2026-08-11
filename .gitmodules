@@ -1,3 +1,6 @@
 [submodule "RE-UE4SS"]
 	path = RE-UE4SS
 	url = https://github.com/UE4SS-RE/RE-UE4SS
+[submodule "AbioticFactor/LuaMods/RandomTweaks/scripts/AFUtils"]
+	path = AbioticFactor/LuaMods/RandomTweaks/scripts/AFUtils
+	url = https://github.com/igromanru/AFUtils-UE4SS.git
