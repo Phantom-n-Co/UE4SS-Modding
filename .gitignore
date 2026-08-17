@@ -6,6 +6,7 @@ cmake-build-*/
 
 # Agent stuff
 .superpowers/
+.worktrees/
 docs/
 
 # Game install symlink
