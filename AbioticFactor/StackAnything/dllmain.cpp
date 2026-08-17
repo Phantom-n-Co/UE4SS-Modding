@@ -20,7 +20,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 static std::wstring getModDir() {
     wchar_t buf[MAX_PATH];
-    DWORD n = GetModuleFileNameW((HMODULE)&__ImageBase, buf, MAX_PATH);
+    const DWORD n = GetModuleFileNameW(reinterpret_cast<HMODULE>(&__ImageBase), buf, MAX_PATH);
     std::wstring path(buf, n);
     auto pos = path.find_last_of(L"\\/");
     path = path.substr(0, pos);                  // strip StackAnything.dll
@@ -44,22 +44,22 @@ static void initOnFirstTick(Unreal::Hook::TCallbackIterationData<void>&,
     }
     s_initialized = true;
 
-    std::wstring modDir = getModDir();
-    std::wstring configPath = (std::filesystem::path(modDir) / L"config.lua").wstring();
+    const std::wstring modDir = getModDir();
+    const std::wstring configPath = (std::filesystem::path(modDir) / L"config.lua").wstring();
 
-    auto config = loadConfig(configPath, kDefaultStackSizes);
+    const auto config = loadConfig(configPath, kDefaultStackSizes);
     RC::Output::send<RC::LogLevel::Verbose>(STR("[StackAnything] Loaded {} stack patterns from {}\n"),
                                             config.size(), configPath.c_str());
 
     applyStackTweaks(config);
 
-    int hooked = registerHooks();
+    const int hooked = registerHooks();
     RC::Output::send<RC::LogLevel::Verbose>(STR("[StackAnything] Registered {} hooks\n"), hooked);
 }
 
 class StackAnything : public RC::CppUserModBase {
 public:
-    StackAnything() : CppUserModBase() {
+    StackAnything() {
         ModName = STR("StackAnything");
         ModVersion = STR("3.0");
         ModDescription = STR("Stack anything");

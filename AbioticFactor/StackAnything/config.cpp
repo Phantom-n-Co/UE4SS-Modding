@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <ranges>
 #include <sstream>
 
 // Built-in defaults, grouped by category. Patterns use ECMAScript regex syntax.
@@ -80,12 +81,12 @@ std::vector<ConfigEntry> buildConfig(const std::vector<std::pair<std::wstring, i
     for (const auto& [pattern, size] : raw) {
         try {
             std::wregex re(pattern);
-            out.push_back(ConfigEntry{pattern, std::move(re), size});
+            out.push_back({.pattern = pattern, .regex = std::move(re), .maxStack = size});
         } catch (const std::regex_error&) {
             // invalid pattern: skipped (mirrors the Lua mod's validation)
         }
     }
-    std::sort(out.begin(), out.end(), [](const ConfigEntry& a, const ConfigEntry& b) {
+    std::ranges::sort(out, [](const ConfigEntry& a, const ConfigEntry& b) {
         return a.pattern.size() > b.pattern.size() ||
                (a.pattern.size() == b.pattern.size() && a.pattern < b.pattern);
     });
@@ -94,11 +95,11 @@ std::vector<ConfigEntry> buildConfig(const std::vector<std::pair<std::wstring, i
 
 std::vector<std::pair<std::wstring, int>> parseConfigText(const std::wstring& content) {
     std::vector<std::pair<std::wstring, int>> out;
-    std::wregex lineRe(L"^\\s*\\[\"(.*)\"\\]\\s*=\\s*(\\d+)\\s*,?\\s*$");
+    const std::wregex lineRe(L"^\\s*\\[\"(.*)\"\\]\\s*=\\s*(\\d+)\\s*,?\\s*$");
     std::wistringstream ss(content);
     std::wstring line;
     while (std::getline(ss, line)) {
-        auto comment = line.find(L"--");
+        const auto comment = line.find(L"--");
         if (comment != std::wstring::npos) {
             line = line.substr(0, comment);
         }
@@ -127,7 +128,7 @@ bool writeDefaultConfig(const std::wstring& path, const std::vector<std::pair<co
     for (const auto& [p, s] : defaults) {
         sorted.emplace_back(p, s);
     }
-    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.first < b.first; });
     std::wofstream out(path);
     if (!out) {
         return false;
@@ -144,7 +145,7 @@ bool writeDefaultConfig(const std::wstring& path, const std::vector<std::pair<co
     return true;
 }
 
-std::vector<std::pair<std::wstring, int>> toWStringPairs(const std::vector<std::pair<const wchar_t*, int>>& defaults) {
+static std::vector<std::pair<std::wstring, int>> toWStringPairs(const std::vector<std::pair<const wchar_t*, int>>& defaults) {
     std::vector<std::pair<std::wstring, int>> out;
     for (const auto& [p, s] : defaults) {
         out.emplace_back(p, s);
@@ -156,10 +157,10 @@ std::vector<ConfigEntry> loadConfig(const std::wstring& path, const std::vector<
     std::wifstream in(path);
     std::wstring content;
     if (in) {
-        content.assign(std::istreambuf_iterator<wchar_t>(in), std::istreambuf_iterator<wchar_t>());
+        content.assign(std::istreambuf_iterator(in), std::istreambuf_iterator<wchar_t>());
     }
-    auto hasContent = [&content]() {
-        return std::any_of(content.begin(), content.end(), [](wchar_t c) { return !std::isspace(c); });
+    const auto hasContent = [&content] {
+        return std::ranges::any_of(content, [](const wchar_t c) { return !std::isspace(c); });
     };
     if (!hasContent()) {
         if (!writeDefaultConfig(path, defaults)) {
@@ -167,12 +168,12 @@ std::vector<ConfigEntry> loadConfig(const std::wstring& path, const std::vector<
         }
         in.clear();
         in.open(path);
-        content.assign(std::istreambuf_iterator<wchar_t>(in), std::istreambuf_iterator<wchar_t>());
+        content.assign(std::istreambuf_iterator(in), std::istreambuf_iterator<wchar_t>());
         if (!hasContent()) {
             return buildConfig(toWStringPairs(defaults));
         }
     }
-    std::vector<std::pair<std::wstring, int>> parsed = parseConfigText(content);
+    const std::vector<std::pair<std::wstring, int>> parsed = parseConfigText(content);
     if (parsed.empty()) {
         return buildConfig(toWStringPairs(defaults));
     }

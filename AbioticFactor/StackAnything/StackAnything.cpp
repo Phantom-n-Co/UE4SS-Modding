@@ -7,12 +7,12 @@
 #include <Unreal/Engine/UDataTable.hpp>
 #include <Unreal/FSoftObjectPath.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
-#include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <ranges>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,7 +37,7 @@ static void* getOutParamValue(UnrealScriptFunctionCallableContext& Ctx, const wc
 
 static bool g_debug = false;
 
-static bool isEnergyLiquidType(int32_t t) {
+static bool isEnergyLiquidType(const int32_t t) {
     return t == E_LiquidType::Energy || t == E_LiquidType::LaserEnergy;
 }
 
@@ -87,7 +87,7 @@ void applyStackTweaks(const std::vector<ConfigEntry>& config) {
 
     std::vector<UDataTable*> tables;
     for (const wchar_t* path : kKnownPaths) {
-        FSoftObjectPath(FString(path)).TryLoad();
+        (void)FSoftObjectPath(FString(path)).TryLoad();
         auto* dt = UObjectGlobals::StaticFindObject<UDataTable*>(nullptr, nullptr, path);
         if (dt) {
             tables.push_back(dt);
@@ -98,14 +98,14 @@ void applyStackTweaks(const std::vector<ConfigEntry>& config) {
         if (!obj->IsA<UDataTable>()) {
             return RC::LoopAction::Continue;
         }
-        std::wstring p = obj->GetPathName();
+        const std::wstring p = obj->GetPathName();
         if (p.find(L"/Game/Blueprints/Items/ItemTable_") == std::wstring::npos ||
             p.find(L"ItemTable_Global") != std::wstring::npos ||
             p.find(L"ItemTable_Pets") != std::wstring::npos) {
             return RC::LoopAction::Continue;
         }
         auto* dt = static_cast<UDataTable*>(obj);
-        if (std::find(tables.begin(), tables.end(), dt) == tables.end()) {
+        if (std::ranges::find(tables, dt) == tables.end()) {
             tables.push_back(dt);
         }
         return RC::LoopAction::Continue;
@@ -126,6 +126,7 @@ void applyStackTweaks(const std::vector<ConfigEntry>& config) {
     }
 }
 
+namespace {
 struct PendingRefund {
     AAbiotic_PlayerCharacter_C* player;
     int32_t liquidType;
@@ -138,10 +139,10 @@ struct PendingDrain {
     int32_t preLiquid;
     int32_t liquidType;
 };
-static PendingRefund g_pendingRefund{};
-static PendingDrain g_pendingDrain{};
+PendingRefund g_pendingRefund{};
+PendingDrain g_pendingDrain{};
 
-static bool isSlotEmpty(const FAbiotic_InventoryItemSlotStruct& slot) {
+bool isSlotEmpty(const FAbiotic_InventoryItemSlotStruct& slot) {
     FName rn = slot.ItemDataTable_18.RowName;
     if (rn.IsNone()) {
         return true;
@@ -161,6 +162,8 @@ struct UpgradeCostState {
     AAbiotic_PlayerCharacter_C* player = nullptr;
     std::vector<ScaledUpgradeCostArray> scaledArrays;
 };
+
+}
 
 static UpgradeCostState g_upgradeCostState;
 
@@ -216,15 +219,18 @@ static void scaleUpgradeCostArray(TArray<FAbioticItemCount_Struct>& items,
     }
 
     const void* data = items.GetData();
-    const auto alreadyScaled = std::find_if(
-        g_upgradeCostState.scaledArrays.begin(),
-        g_upgradeCostState.scaledArrays.end(),
+    const auto alreadyScaled = std::ranges::find_if(
+        g_upgradeCostState.scaledArrays,
         [data](const ScaledUpgradeCostArray& scaled) { return scaled.data == data; });
     if (alreadyScaled != g_upgradeCostState.scaledArrays.end()) {
         return;
     }
 
-    ScaledUpgradeCostArray scaled{&items, data, {}};
+    ScaledUpgradeCostArray scaled{
+        .array = &items,
+        .data = data,
+        .originalCounts = {},
+    };
     scaled.originalCounts.reserve(items.Num());
     for (int32_t i = 0; i < items.Num(); ++i) {
         scaled.originalCounts.push_back(items[i].Count);
@@ -239,7 +245,7 @@ static void scaleUpgradeCostArray(TArray<FAbioticItemCount_Struct>& items,
 
 static int32_t getMaxStack(const FAbiotic_InventoryItemSlotStruct& slot) {
     UDataTable* dt = slot.ItemDataTable_18.DataTable;
-    FName rn = slot.ItemDataTable_18.RowName;
+    const FName rn = slot.ItemDataTable_18.RowName;
     if (!dt || rn.IsNone()) {
         return 0;
     }
@@ -247,11 +253,14 @@ static int32_t getMaxStack(const FAbiotic_InventoryItemSlotStruct& slot) {
     return row ? row->StackSize_47 : 0;
 }
 
+namespace {
 struct SplitTarget {
     UAbiotic_InventoryComponent_C* inventory;
     int32_t index;
     bool mergeInto;
 };
+
+}
 
 static SplitTarget findSplitTarget(AAbiotic_PlayerCharacter_C* player,
                                    UAbiotic_InventoryComponent_C* givenInventory,
@@ -287,11 +296,11 @@ static SplitTarget findSplitTarget(AAbiotic_PlayerCharacter_C* player,
                 continue;
             }
             FAbiotic_InventoryChangeableDataStruct& c = slot.ChangeableData_12;
-            int32_t maxStack = getMaxStack(slot);
+            const int32_t maxStack = getMaxStack(slot);
             if (maxStack > 0 && c.CurrentStack_9 > 0 && c.CurrentStack_9 + amountToAdd <= maxStack &&
                 c.LiquidLevel_46 == liquidLevel &&
                 static_cast<int32_t>(c.CurrentLiquid_19.GetValue()) == liquidType) {
-                return {inv, i, true};
+                return {.inventory = inv, .index = i, .mergeInto = true};
             }
         }
     }
@@ -307,11 +316,11 @@ static SplitTarget findSplitTarget(AAbiotic_PlayerCharacter_C* player,
                 continue;
             }
             if (isSlotEmpty(slots[i])) {
-                return {inv, i, false};
+                return {.inventory = inv, .index = i, .mergeInto = false};
             }
         }
     }
-    return {nullptr, -1, false};
+    return {.inventory = nullptr, .index = -1, .mergeInto = false};
 }
 
 static void refreshInventory(UAbiotic_InventoryComponent_C* inv) {
@@ -334,9 +343,9 @@ static void refundSourceContainer(ADeployed_LiquidContainer_ParentBP_C* source,
     if (view->InfiniteSource) {
         return;
     }
-    int32_t current = view->Liquid_FillLevel;
-    int32_t maxFill = view->Liquid_MaxFill;
-    int32_t newLevel = std::min(current + amount, maxFill);
+    const int32_t current = view->Liquid_FillLevel;
+    const int32_t maxFill = view->Liquid_MaxFill;
+    const int32_t newLevel = std::min(current + amount, maxFill);
     if (newLevel == current) {
         return;
     }
@@ -358,7 +367,7 @@ static void post_TryChangeValueInLiquidContainer(UnrealScriptFunctionCallableCon
         return;
     }
     UObject* player = Ctx.Context;
-    int32_t slotIndex = p.SlotIndex;
+    const int32_t slotIndex = p.SlotIndex;
     if (slotIndex < 0) {
         return;
     }
@@ -375,12 +384,12 @@ static void post_TryChangeValueInLiquidContainer(UnrealScriptFunctionCallableCon
     }
     FAbiotic_InventoryChangeableDataStruct& changeable = slots[slotIndex].ChangeableData_12;
 
-    int32_t liquidType = static_cast<int32_t>(p.LiquidType.GetValue());
+    const int32_t liquidType = p.LiquidType.GetValue();
     if (isEnergyLiquidType(liquidType)) {
         return;
     }
 
-    int32_t stack = changeable.CurrentStack_9;
+    const int32_t stack = changeable.CurrentStack_9;
     if (stack <= 1) {
         return;
     }
@@ -397,7 +406,7 @@ static void post_TryChangeValueInLiquidContainer(UnrealScriptFunctionCallableCon
         return;
     }
 
-    FName rowName = slots[slotIndex].ItemDataTable_18.RowName;
+    const FName rowName = slots[slotIndex].ItemDataTable_18.RowName;
     SplitTarget target = findSplitTarget(reinterpret_cast<AAbiotic_PlayerCharacter_C*>(player),
                                          inventory, rowName, liquidType, p.NewLiquidValue, 1,
                                          inventory, slotIndex);
@@ -405,7 +414,11 @@ static void post_TryChangeValueInLiquidContainer(UnrealScriptFunctionCallableCon
         changeable.CurrentLiquid_19 = E_LiquidType::None;
         changeable.LiquidLevel_46 = 0;
         refreshInventory(inventory);
-        g_pendingRefund = {reinterpret_cast<AAbiotic_PlayerCharacter_C*>(player), liquidType, p.NewLiquidValue};
+        g_pendingRefund = {
+            .player = reinterpret_cast<AAbiotic_PlayerCharacter_C*>(player),
+            .liquidType = liquidType,
+            .amount = p.NewLiquidValue,
+        };
         return;
     }
 
@@ -448,8 +461,13 @@ static void post_IsHoldingLiquidContainer(UnrealScriptFunctionCallableContext& C
     auto* ltypeAddr = static_cast<TEnumAsByte<E_LiquidType::Type>*>(getOutParamValue(Ctx, L"CurrentLiquidType"));
     int32_t fill = fillAddr ? *fillAddr : 0;
     int32_t ltype = ltypeAddr ? static_cast<int32_t>(ltypeAddr->GetValue()) : 0;
-    g_pendingDrain = {reinterpret_cast<AAbiotic_PlayerCharacter_C*>(player),
-                      selected.Inventory_2, selected.Index_5, fill, ltype};
+    g_pendingDrain = {
+        .player = reinterpret_cast<AAbiotic_PlayerCharacter_C*>(player),
+        .inventory = selected.Inventory_2,
+        .slotIndex = selected.Index_5,
+        .preLiquid = fill,
+        .liquidType = ltype,
+    };
 }
 
 static void post_TryFill_TO_PlayerContainer(UnrealScriptFunctionCallableContext& Ctx, void*) {
@@ -509,14 +527,14 @@ static void post_TryFill_FROM_PlayerContainer(UnrealScriptFunctionCallableContex
         return;
     }
     FAbiotic_InventoryChangeableDataStruct& changeable = slots[slotIndex].ChangeableData_12;
-    int32_t stack = changeable.CurrentStack_9;
+    const int32_t stack = changeable.CurrentStack_9;
     if (stack <= 1 || changeable.LiquidLevel_46 >= preLiquid) {
         return;
     }
 
-    FName rowName = slots[slotIndex].ItemDataTable_18.RowName;
-    int32_t curLiquidType = static_cast<int32_t>(changeable.CurrentLiquid_19.GetValue());
-    int32_t curLiquid = changeable.LiquidLevel_46;
+    const FName rowName = slots[slotIndex].ItemDataTable_18.RowName;
+    const int32_t curLiquidType = changeable.CurrentLiquid_19.GetValue();
+    const int32_t curLiquid = changeable.LiquidLevel_46;
     SplitTarget target = findSplitTarget(player, inventory, rowName, curLiquidType, curLiquid, 1,
                                          inventory, slotIndex);
     if (!target.inventory) {
@@ -548,12 +566,12 @@ static void post_TryFill_FROM_PlayerContainer(UnrealScriptFunctionCallableContex
 }
 
 static std::wstring getVariantName(const FAbiotic_InventoryChangeableDataStruct& c) {
-    FName rn = c.TextureVariantRow_28.RowName;
+    const FName rn = c.TextureVariantRow_28.RowName;
     if (rn.IsNone()) {
         return {};
     }
-    std::wstring s = rn.ToString();
-    return (s == L"None" || s == L"Empty") ? std::wstring{} : s;
+    const std::wstring s = rn.ToString();
+    return s == L"None" || s == L"Empty" ? std::wstring{} : s;
 }
 
 static void post_AreItemsStackable(UnrealScriptFunctionCallableContext& Ctx, void*) {
@@ -562,10 +580,10 @@ static void post_AreItemsStackable(UnrealScriptFunctionCallableContext& Ctx, voi
     if (!slot1 || !slot2) {
         return;
     }
-    FAbiotic_InventoryChangeableDataStruct& c1 = slot1->ChangeableData_12;
-    FAbiotic_InventoryChangeableDataStruct& c2 = slot2->ChangeableData_12;
-    int32_t l1 = static_cast<int32_t>(c1.CurrentLiquid_19.GetValue());
-    int32_t l2 = static_cast<int32_t>(c2.CurrentLiquid_19.GetValue());
+    const FAbiotic_InventoryChangeableDataStruct& c1 = slot1->ChangeableData_12;
+    const FAbiotic_InventoryChangeableDataStruct& c2 = slot2->ChangeableData_12;
+    const int32_t l1 = c1.CurrentLiquid_19.GetValue();
+    const int32_t l2 = c2.CurrentLiquid_19.GetValue();
     if (isEnergyLiquidType(l1) || isEnergyLiquidType(l2)) {
         return; // batteries/lasers keep vanilla stack-charge behavior
     }
@@ -602,12 +620,12 @@ static void pre_SortInventoryArray(UnrealScriptFunctionCallableContext& Ctx, voi
         }
         FAbiotic_InventoryChangeableDataStruct& c = slots[item.SourceIndex].ChangeableData_12;
         std::wstring suffix;
-        int32_t ltype = static_cast<int32_t>(c.CurrentLiquid_19.GetValue());
-        int32_t lvl = c.LiquidLevel_46;
+        const int32_t ltype = c.CurrentLiquid_19.GetValue();
+        const int32_t lvl = c.LiquidLevel_46;
         if (lvl > 0 && !isEnergyLiquidType(ltype)) {
             suffix += L"_L" + std::to_wstring(ltype) + L"_" + std::to_wstring(lvl);
         }
-        std::wstring variant = getVariantName(c);
+        const std::wstring variant = getVariantName(c);
         if (!variant.empty()) {
             suffix += L"_V" + variant;
         }
@@ -624,7 +642,7 @@ static void pre_IsInventoryFull(UnrealScriptFunctionCallableContext& Ctx, void*)
 
     constexpr wchar_t suffix[] = L".UpgradeItemInventory";
     constexpr size_t suffixLength = sizeof(suffix) / sizeof(wchar_t) - 1;
-    std::wstring inventoryPath = Ctx.Context->GetPathName();
+    const std::wstring inventoryPath = Ctx.Context->GetPathName();
     if (inventoryPath.size() < suffixLength ||
         inventoryPath.compare(inventoryPath.size() - suffixLength,
                               suffixLength, suffix) != 0) {
@@ -683,11 +701,14 @@ static void pre_ConsumeCraftingRecipe(UnrealScriptFunctionCallableContext& Ctx, 
     scaleUpgradeCostArray(*items, g_upgradeCostState.multiplier);
 }
 
+namespace {
 struct UpgradeUiScaleFrame {
     TArray<FNativeItemCountView>* requiredItems = nullptr;
     const void* data = nullptr;
     std::vector<int32_t> originalCounts;
 };
+
+}
 
 static std::vector<UpgradeUiScaleFrame> g_upgradeUiScaleStack;
 
@@ -728,7 +749,7 @@ static void pre_UpdateSelectedRecipeItem(UnrealScriptFunctionCallableContext& Ct
     }
 }
 
-static void post_UpdateSelectedRecipeItem(UnrealScriptFunctionCallableContext& Ctx, void*) {
+static void post_UpdateSelectedRecipeItem(UnrealScriptFunctionCallableContext&, void*) {
     if (g_upgradeUiScaleStack.empty()) {
         return;
     }

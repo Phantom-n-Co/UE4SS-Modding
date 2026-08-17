@@ -1,7 +1,5 @@
 #pragma once
 #include <Unreal/UObject.hpp>
-#include <Unreal/UObjectGlobals.hpp>
-#include <Unreal/UFunctionStructs.hpp>
 #include <Unreal/Engine/UDataTable.hpp>
 #include <Unreal/FString.hpp>
 #include <Unreal/NameTypes.hpp>
@@ -72,12 +70,12 @@ struct FAbiotic_InventoryItemSlotStruct {
     FAbiotic_InventoryChangeableDataStruct ChangeableData_12;         // 0x10
 }; // 0x98
 
-struct FInventorySlotSelected_Struct {
 #pragma pack(push, 4)
+struct FInventorySlotSelected_Struct {
     UAbiotic_InventoryComponent_C* Inventory_2;                       // 0x00
     int32 Index_5;                                                    // 0x08
-#pragma pack(pop)
 }; // 0x0C
+#pragma pack(pop)
 
 struct FSAItemRow {
     char pad0[0x238];
