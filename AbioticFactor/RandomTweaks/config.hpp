@@ -16,6 +16,7 @@ struct TweakConfig {
     std::optional<double> lanternIntensity;
     bool disableWatchLight = false;
     bool wishingShelfTopUp = true;
+    bool transmogHideSuitAndBackpack = true;
 };
 
 // Built-in defaults, matching the Lua mod's config.lua. Only used when

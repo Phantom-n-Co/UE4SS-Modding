@@ -9,6 +9,7 @@ static void test_parse_full_config() {
                         L"  instantButcher = true,\n"
                         L"  debugLogging = false,\n"
                         L"  wishingShelfTopUp = false,\n"
+                        L"  transmogHideSuitAndBackpack = false,\n"
                         L"  player = {\n"
                         L"    walkSpeed = 550,\n"
                         L"    sprintSpeed = 822.0,  -- trailing comment\n"
@@ -21,6 +22,7 @@ static void test_parse_full_config() {
     assert(cfg.instantButcher);
     assert(!cfg.debugLogging);
     assert(!cfg.wishingShelfTopUp);
+    assert(!cfg.transmogHideSuitAndBackpack);
     assert(cfg.walkSpeed.has_value() && *cfg.walkSpeed == 550.0);
     assert(cfg.sprintSpeed.has_value() && *cfg.sprintSpeed == 822.0);
     assert(cfg.staminaDrainRate.has_value() && *cfg.staminaDrainRate == 0.25);
@@ -35,6 +37,7 @@ static void test_parse_missing_returns_all_skipped() {
     assert(!cfg.walkSpeed.has_value());
     assert(!cfg.disableWatchLight);
     assert(cfg.wishingShelfTopUp); // default on when line missing
+    assert(cfg.transmogHideSuitAndBackpack); // default on when line missing
 }
 
 static void test_defaults_match_shipped_lua() {
@@ -52,6 +55,7 @@ static void test_defaults_match_shipped_lua() {
     assert(*d.lanternIntensity == 5.45);
     assert(!d.disableWatchLight);
     assert(d.wishingShelfTopUp);
+    assert(d.transmogHideSuitAndBackpack);
 }
 
 static void test_write_and_reload() {
@@ -61,6 +65,7 @@ static void test_write_and_reload() {
     assert(cfg.instantButcher);
     assert(*cfg.walkSpeed == 550.0);
     assert(*cfg.lanternIntensity == 5.45);
+    assert(cfg.transmogHideSuitAndBackpack);
     std::remove("randomtweaks_config_test_tmp.lua");
 }
 

@@ -31,7 +31,25 @@ static const wchar_t* kShelfClassPath =
     L"/Game/Blueprints/DeployedObjects/Furniture/Deployed_WishingShelf.Deployed_WishingShelf_C";
 static const wchar_t* kWishingShelfItemsTablePath =
     L"/Game/Blueprints/DataTables/DT_WishingShelfItems.DT_WishingShelfItems";
+static const wchar_t* kUpdateGearVisualPath =
+    L"/Game/Blueprints/Characters/Abiotic_PlayerCharacter.Abiotic_PlayerCharacter_C:Update Gear Visual Status";
+static const wchar_t* kUpdateFPMeshVisibilityPath =
+    L"/Game/Blueprints/Characters/Abiotic_PlayerCharacter.Abiotic_PlayerCharacter_C:UpdateFPMeshVisibility";
+static const wchar_t* kTrinketClassPath =
+    L"/Game/Blueprints/Items/Gear/Gear_Trinket_ParentBP.Gear_Trinket_ParentBP_C";
+static const wchar_t* kStartAttachTrinketPath =
+    L"/Game/Blueprints/Items/Gear/Gear_Trinket_ParentBP.Gear_Trinket_ParentBP_C:StartAttachTrinket";
+static const wchar_t* kTransmogSlotClassPath =
+    L"/Game/Blueprints/Widgets/Inventory/W_TransmogItemSlot.W_TransmogItemSlot_C";
+static const wchar_t* kTransmogSlotEmptyClickPath =
+    L"/Game/Blueprints/Widgets/Inventory/W_TransmogItemSlot.W_TransmogItemSlot_C:OnEmptySlotClicked";
 static constexpr double kNightLightZ = 1000.2581;
+// E_InventorySlotType::EquipmentSlot_Suit / _Backpack. Transmog arrays are indexed by
+// SlotTypeToIndex, which is (slot - 3).
+static constexpr uint8_t kSuitSlot = 8;
+static constexpr uint8_t kBackpackSlot = 6;
+static constexpr int32_t kBackpackTransmogIndex = kBackpackSlot - 3;
+static constexpr int32_t kSuitTransmogIndex = kSuitSlot - 3;
 
 static TweakConfig g_config{};
 static UClass* g_playerClass = nullptr;
@@ -512,6 +530,253 @@ static void post_IsInventorySlotEmpty(UnrealScriptFunctionCallableContext& Ctx, 
 
 static void noopHook(UnrealScriptFunctionCallableContext&, void*) {}
 
+// ---- Hide full suit via transmog ----
+// Vanilla hides a gear piece when its transmog toggle (DisableTransmogArray[i],
+// passed to GetVisualItemData as CheckForTransmog, so true = transmog on) is on
+// AND the dresser slot is set to hidden (TransmogVisibility[i] == false). The
+// suit branch of Update Gear Visual Status skips that check and the dresser's
+// suit slot has AllowClickEmptyToHide = false; both are patched here. While the
+// suit is hidden, Gear_SuitBP is nulled for the duration of the visual functions
+// so the game runs its own "no suit" path (clothing, armor, FP legs, visor).
+
+static bool setObjectProperty(UObject* obj, const wchar_t* name, UObject* value) {
+    if (!obj) {
+        return false;
+    }
+    FProperty* prop = obj->GetPropertyByNameInChain(name);
+    auto* objProp = CastField<FObjectPropertyBase>(prop);
+    if (!objProp) {
+        return false;
+    }
+    objProp->SetObjectPropertyValue(prop->ContainerPtrToValuePtr<void>(obj), value);
+    return true;
+}
+
+static bool getBoolArrayElement(UObject* obj, const wchar_t* name, int32_t index, bool fallback) {
+    if (!obj) {
+        return fallback;
+    }
+    FProperty* prop = obj->GetPropertyByNameInChain(name);
+    if (!CastField<FArrayProperty>(prop)) {
+        return fallback;
+    }
+    const auto* arr = reinterpret_cast<const TArray<bool>*>(prop->ContainerPtrToValuePtr<void>(obj));
+    if (index < 0 || index >= arr->Num()) {
+        return fallback;
+    }
+    return (*arr)[index];
+}
+
+static int32_t getByteParam(UnrealScriptFunctionCallableContext& Ctx, const wchar_t* name) {
+    UFunction* fn = Ctx.TheStack.Node();
+    if (!fn) {
+        return -1;
+    }
+    for (FProperty* prop : TFieldRange<FProperty>(fn, EFieldIterationFlags::IncludeDeprecated)) {
+        if (prop->GetName() == name) {
+            return *prop->ContainerPtrToValuePtr<uint8_t>(Ctx.TheStack.Locals());
+        }
+    }
+    return -1;
+}
+
+// Calls a function on `obj` whose params are all set by `fill(name, valuePtr, prop)`.
+template <typename Fill>
+static void callWithParams(UObject* obj, const wchar_t* fnName, Fill fill) {
+    UFunction* fn = obj ? obj->GetFunctionByNameInChain(fnName) : nullptr;
+    if (!fn) {
+        return;
+    }
+    std::vector<uint8_t> params(fn->GetStructureSize());
+    for (FProperty* prop : TFieldRange<FProperty>(fn, EFieldIterationFlags::IncludeDeprecated)) {
+        fill(prop->GetName(), params.data() + prop->GetOffset_ForInternal(), prop);
+    }
+    obj->ProcessEvent(fn, params.data());
+}
+
+static bool isSuitHiddenByTransmog(UObject* player) {
+    UObject* tmog = getObjectProperty(player, STR("TmogInventory"));
+    if (!tmog) {
+        return false;
+    }
+    const bool transmogOn = getBoolArrayElement(tmog, STR("DisableTransmogArray"), kSuitTransmogIndex, true);
+    const bool visible = getBoolArrayElement(tmog, STR("TransmogVisibility"), kSuitTransmogIndex, true);
+    return transmogOn && !visible;
+}
+
+// One entry per in-flight hooked visual call; `suit` is set when that call
+// nulled Gear_SuitBP and must restore it. Nested calls see the null and skip.
+struct SuitStash {
+    UObject* player;
+    UObject* suit;
+    bool isSuitSlot;
+};
+static std::vector<SuitStash> g_suitStash;
+
+// Suit hidden state last applied by an Update Gear Visual Status(Suit) call, per
+// player. Other slots' updates (e.g. OnRep_TransmogVisibility -> slot All) don't
+// touch the suit, so a mismatch triggers a suit refresh.
+struct SuitApplied {
+    FWeakObjectPtr player;
+    bool hidden;
+};
+static std::vector<SuitApplied> g_suitApplied;
+
+static bool* findSuitApplied(UObject* player) {
+    for (auto& entry : g_suitApplied) {
+        if (entry.player.Get() == player) {
+            return &entry.hidden;
+        }
+    }
+    return nullptr;
+}
+
+static void setSuitApplied(UObject* player, bool hidden) {
+    if (bool* existing = findSuitApplied(player)) {
+        *existing = hidden;
+        return;
+    }
+    std::erase_if(g_suitApplied, [](const SuitApplied& e) { return !e.player.Get(); });
+    g_suitApplied.push_back({FWeakObjectPtr(player), hidden});
+}
+
+static void beginSuitVisual(UObject* player, bool isSuitSlot) {
+    SuitStash frame{player, nullptr, isSuitSlot};
+    UObject* suit = g_config.transmogHideSuitAndBackpack ? getObjectProperty(player, STR("Gear_SuitBP")) : nullptr;
+    if (suit) {
+        const bool hidden = isSuitHiddenByTransmog(player);
+        if (isSuitSlot) {
+            setSuitApplied(player, hidden);
+        }
+        if (hidden) {
+            if (isSuitSlot) {
+                // The skipped suit branch would attach and hide the logic actor.
+                callWithParams(player, STR("Attach Logic Actor and Hide It"),
+                               [&](const std::wstring& name, void* at, FProperty* prop) {
+                                   if (name == L"LogicActor") {
+                                       if (auto* objProp = CastField<FObjectPropertyBase>(prop)) {
+                                           objProp->SetObjectPropertyValue(at, suit);
+                                       }
+                                   }
+                               });
+                log(L"suit: hidden by transmog");
+            }
+            setObjectProperty(player, STR("Gear_SuitBP"), nullptr);
+            frame.suit = suit;
+        }
+    }
+    g_suitStash.push_back(frame);
+}
+
+static SuitStash endSuitVisual() {
+    if (g_suitStash.empty()) {
+        return {};
+    }
+    SuitStash frame = g_suitStash.back();
+    g_suitStash.pop_back();
+    if (frame.suit && !getObjectProperty(frame.player, STR("Gear_SuitBP"))) {
+        setObjectProperty(frame.player, STR("Gear_SuitBP"), frame.suit);
+    }
+    return frame;
+}
+
+static void pre_UpdateGearVisualStatus(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    beginSuitVisual(Ctx.Context, getByteParam(Ctx, L"EquipSlot") == kSuitSlot);
+}
+
+static void post_UpdateGearVisualStatus(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    const SuitStash frame = endSuitVisual();
+    UObject* player = Ctx.Context;
+    if (!g_config.transmogHideSuitAndBackpack || !player || !g_suitStash.empty() || frame.isSuitSlot) {
+        return;
+    }
+    if (!getObjectProperty(player, STR("Gear_SuitBP"))) {
+        return;
+    }
+    const bool hidden = isSuitHiddenByTransmog(player);
+    const bool* applied = findSuitApplied(player);
+    if ((applied ? *applied : false) == hidden) {
+        return;
+    }
+    callWithParams(player, STR("Update Gear Visual Status"),
+                   [](const std::wstring& name, void* at, FProperty*) {
+                       if (name == L"EquipSlot") {
+                           *static_cast<uint8_t*>(at) = kSuitSlot;
+                       }
+                   });
+}
+
+static void pre_UpdateFPMeshVisibility(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    beginSuitVisual(Ctx.Context, false);
+}
+
+static void post_UpdateFPMeshVisibility(UnrealScriptFunctionCallableContext&, void*) {
+    endSuitVisual();
+}
+
+// ---- Backpack trinkets ----
+// The game hides a transmog-hidden backpack's mesh but leaves trinkets attached
+// to its sockets, so they float. StartAttachTrinket picks the backpack socket
+// only when IsValid(AttachedCharacter.Gear_BackpackBP), synchronously before
+// its async mesh load; nulling that for the call makes trinkets use their
+// no-backpack body attachment instead.
+static bool isBackpackHiddenByTransmog(UObject* player) {
+    UObject* tmog = getObjectProperty(player, STR("TmogInventory"));
+    if (!tmog) {
+        return false;
+    }
+    const bool transmogOn = getBoolArrayElement(tmog, STR("DisableTransmogArray"), kBackpackTransmogIndex, true);
+    const bool visible = getBoolArrayElement(tmog, STR("TransmogVisibility"), kBackpackTransmogIndex, true);
+    return transmogOn && !visible;
+}
+
+struct BackpackStash {
+    UObject* player;
+    UObject* backpack;
+};
+static std::vector<BackpackStash> g_backpackStash;
+
+static void pre_StartAttachTrinket(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    BackpackStash frame{getObjectParam(Ctx, L"AttachedCharacter"), nullptr};
+    if (g_config.transmogHideSuitAndBackpack && frame.player) {
+        UObject* backpack = getObjectProperty(frame.player, STR("Gear_BackpackBP"));
+        if (backpack && isBackpackHiddenByTransmog(frame.player)) {
+            setObjectProperty(frame.player, STR("Gear_BackpackBP"), nullptr);
+            frame.backpack = backpack;
+            log(L"trinket: attaching to body, backpack hidden by transmog");
+        }
+    }
+    g_backpackStash.push_back(frame);
+}
+
+static void post_StartAttachTrinket(UnrealScriptFunctionCallableContext&, void*) {
+    if (g_backpackStash.empty()) {
+        return;
+    }
+    BackpackStash frame = g_backpackStash.back();
+    g_backpackStash.pop_back();
+    if (frame.backpack && !getObjectProperty(frame.player, STR("Gear_BackpackBP"))) {
+        setObjectProperty(frame.player, STR("Gear_BackpackBP"), frame.backpack);
+    }
+}
+
+// Lets the dresser's empty suit and backpack slots toggle their hidden flag like
+// the armor slots (vanilla sets AllowClickEmptyToHide = false on both). The
+// game hides the backpack mesh itself; trinkets are handled above.
+static void pre_TransmogSlotEmptyClicked(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    UObject* slot = Ctx.Context;
+    if (!g_config.transmogHideSuitAndBackpack || !slot) {
+        return;
+    }
+    auto* slotType = static_cast<uint8_t*>(slot->GetValuePtrByPropertyNameInChain(STR("SlotType")));
+    if (!slotType || (*slotType != kSuitSlot && *slotType != kBackpackSlot)) {
+        return;
+    }
+    if (auto* allow = CastField<FBoolProperty>(slot->GetPropertyByNameInChain(STR("AllowClickEmptyToHide")))) {
+        allow->SetPropertyValueInContainer(slot, true);
+    }
+}
+
 bool tryInit(const TweakConfig& config) {
     g_config = config;
     if (g_playerClass) {
@@ -562,5 +827,12 @@ int registerHooks() {
         STR("/Game/Blueprints/Characters/Abiotic_PlayerCharacter.Abiotic_PlayerCharacter_C:LocalUpdateJumpHeight"),
         nullptr, post_LocalUpdateJumpHeight);
     count += registerHook(kIsInventorySlotEmptyPath, nullptr, post_IsInventorySlotEmpty);
+    count += registerHook(kUpdateGearVisualPath, pre_UpdateGearVisualStatus, post_UpdateGearVisualStatus);
+    count += registerHook(kUpdateFPMeshVisibilityPath, pre_UpdateFPMeshVisibility, post_UpdateFPMeshVisibility);
+    // These BPs aren't loaded at boot; load them so the hooks can resolve.
+    FSoftObjectPath(FString(kTrinketClassPath)).TryLoad();
+    count += registerHook(kStartAttachTrinketPath, pre_StartAttachTrinket, post_StartAttachTrinket);
+    FSoftObjectPath(FString(kTransmogSlotClassPath)).TryLoad();
+    count += registerHook(kTransmogSlotEmptyClickPath, pre_TransmogSlotEmptyClicked, nullptr);
     return count;
 }

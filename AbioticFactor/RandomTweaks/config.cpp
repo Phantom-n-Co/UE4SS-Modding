@@ -22,6 +22,7 @@ const TweakConfig kDefaultTweaks = {
     /*lanternIntensity =*/5.45,
     /*disableWatchLight =*/false,
     /*wishingShelfTopUp =*/true,
+    /*transmogHideSuitAndBackpack =*/true,
 };
 
 namespace {
@@ -96,6 +97,8 @@ void parseAssignment(const std::wstring& line, TweakConfig& cfg, bool inTweaks) 
         cfg.debugLogging = (value == L"true");
     } else if (key == L"wishingShelfTopUp") {
         cfg.wishingShelfTopUp = (value == L"true");
+    } else if (key == L"transmogHideSuitAndBackpack") {
+        cfg.transmogHideSuitAndBackpack = (value == L"true");
     }
 }
 
@@ -141,6 +144,8 @@ bool writeDefaultConfig(const std::wstring& path) {
     out << L"  instantButcher = " << (kDefaultTweaks.instantButcher ? L"true" : L"false") << L",\n";
     out << L"  wishingShelfTopUp = " << (kDefaultTweaks.wishingShelfTopUp ? L"true" : L"false")
         << L",  -- also fill a stocked stocking slot when it already holds the shelf slot's item\n";
+    out << L"  transmogHideSuitAndBackpack = " << (kDefaultTweaks.transmogHideSuitAndBackpack ? L"true" : L"false")
+        << L",  -- full suit and backpack can be hidden via their empty dresser slots, like other armor\n";
     out << L"\n  player = {\n";
     for (const auto& f : kOptionalFields) {
         const double v = (kDefaultTweaks.*(f.field)).value();

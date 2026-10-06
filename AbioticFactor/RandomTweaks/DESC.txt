@@ -1,6 +1,6 @@
 [center][size=6][b]RandomTweaks[/b][/size][/center]
 
-[center]A handful of quality-of-life tweaks: instant butchering, a wish-list stocking top-up for the Wishing Shelf, and configurable player stat adjustments.[/center]
+[center]A handful of quality-of-life tweaks: instant butchering, a wish-list stocking top-up for the Wishing Shelf, hiding the full suit and backpack through transmog, and configurable player stat adjustments.[/center]
 
 [size=5][b]Requirements[/b][/size]
 UE4SS 1.21.0 or above.
@@ -23,6 +23,9 @@ Every damage event with a valid damage type gibs the target instantly.
 
 [size=4][b]Wishing Shelf Top-Up[/b][/size]
 When the Wishing Shelf spawns gifts, a stocked stocking slot that already holds the same item as the shelf slot is topped up to its max stack instead of being left alone. The amount is rolled from the same quantity range the shelf uses, and items gated behind world flags stay gated.
+
+[size=4][b]Hide Full Suit and Backpack[/b][/size]
+The full suit and backpack can be hidden through the Transmog Dresser, the same way as other armor. Config key: [font=courier]transmogHideSuitAndBackpack[/font].
 
 [size=4][b]Player Tweaks[/b][/size]
 Adjustable player stats, each independent:
