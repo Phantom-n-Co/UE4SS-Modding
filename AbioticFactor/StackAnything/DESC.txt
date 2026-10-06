@@ -3,7 +3,7 @@
 [center]Modify any items to stack to any amount you wish, be it furniture, fish, deployable, or anything else. Fully configurable via regular expressions.[/center]
 
 [size=5][b]Requirements[/b][/size]
-UE4SS 1.21.0 or above.
+UE4SS 1.23.0 (Nexus; commit 35d1795d). Tested on this version only.
 
 [size=5][b]Installation[/b][/size]
 [list=1]
