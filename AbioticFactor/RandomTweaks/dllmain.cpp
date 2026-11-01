@@ -1,10 +1,8 @@
 #include <Mod/CppUserModBase.hpp>
 #include <DynamicOutput/DynamicOutput.hpp>
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
+// Unreal's wrapper: raw <Windows.h> macros (InterlockedCompareExchangePointer, MemoryBarrier) break later Unreal headers under clang-cl
+#include <Unreal/Core/Windows/WindowsHWrapper.hpp>
 
 #include <Unreal/Hooks/Hooks.hpp>
 #include <Unreal/UnrealInitializer.hpp>

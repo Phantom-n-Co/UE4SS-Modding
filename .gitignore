@@ -4,10 +4,9 @@ cmake-build-*/
 # IDE
 .idea/
 
-# Agent stuff
-.superpowers/
-.worktrees/
-docs/
-
 # Game install symlink
 AbioticFactor/AbioticFactor
+
+xwin/
+.xwin-cache/
+CMakeUserPresets.json
