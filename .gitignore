@@ -10,3 +10,4 @@ AbioticFactor/AbioticFactor
 xwin/
 .xwin-cache/
 CMakeUserPresets.json
+AbioticFactor/BPDecomp/
