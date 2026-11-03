@@ -49,7 +49,11 @@ static void initOnFirstTick(Unreal::Hook::TCallbackIterationData<void>&,
     RC::Output::send<RC::LogLevel::Verbose>(STR("[StackAnything] Loaded {} stack patterns from {}\n"),
                                             config.size(), configPath.c_str());
 
-    applyStackTweaks(config);
+    initGameLayout();
+    const bool dumpItems = loadDumpItemsFlag(configPath);
+    const std::wstring dumpPath =
+        dumpItems ? (std::filesystem::path(modDir) / L"item_dump.lua").wstring() : std::wstring{};
+    applyStackTweaks(config, dumpPath);
 
     const int hooked = registerHooks();
     RC::Output::send<RC::LogLevel::Verbose>(STR("[StackAnything] Registered {} hooks\n"), hooked);

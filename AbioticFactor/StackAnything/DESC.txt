@@ -3,7 +3,7 @@
 [center]Modify any items to stack to any amount you wish, be it furniture, fish, deployable, or anything else. Fully configurable via regular expressions.[/center]
 
 [size=5][b]Requirements[/b][/size]
-UE4SS 1.23.0 (Nexus; commit 35d1795d). Tested on this version only.
+Built against UE4SS 3.0.1 (commit 1ba38db4) for Abiotic Factor 1.5.0 (Modding Update).
 
 [size=5][b]Installation[/b][/size]
 [list=1]
@@ -17,7 +17,7 @@ On the first run (or if [font=courier]config.lua[/font] is missing or empty) the
 Delete [font=courier]config.lua[/font] and restart to regenerate the defaults.
 Edit [font=courier]config.lua[/font] to customize; it is never overwritten while it exists.
 
-The config maps regular expressions to max stack sizes. Longer (more specific) patterns win; items not matched by any pattern keep their vanilla stack size.
+The config maps regular expressions to max stack sizes. Longer (more specific) patterns win; items not matched by any pattern keep their vanilla stack size. Items added by official (mod.io) mods are matched too.
 
 [code]return {
   ["fish_.+"] = 20,       -- all fish
@@ -68,11 +68,11 @@ Stacked items can be placed into the upgrade bench and upgraded in batches:
 
 To find the item IDs used in the config patterns, the mod can dump every item it knows about:
 [list]
-[*]Open [font=courier]Mods/StackAnything/Scripts/main.lua[/font][/*]
-[*]Set [font=courier]DUMP_ITEMS = true[/font] at the top[/*]
-[*]Restart the game[/*]
+[*]Open [font=courier]Mods/StackAnything/config.lua[/font][/*]
+[*]Set [font=courier]dumpItems = true[/font] near the top (add the line inside [font=courier]return {[/font] if your config predates it)[/*]
+[*]Restart the game and load a world (the dump is rewritten on startup and on each world load, so items from official mods are included)[/*]
 [*]Read [font=courier]Mods/StackAnything/item_dump.lua[/font] - it lists every item's ID (row name), display name, current stack size, and more[/*]
-[*]Set [font=courier]DUMP_ITEMS = false[/font] and restart to stop dumping[/*]
+[*]Set [font=courier]dumpItems = false[/font] and restart to stop dumping[/*]
 [/list]
 
 [size=5][b]Default Overrides[/b][/size]

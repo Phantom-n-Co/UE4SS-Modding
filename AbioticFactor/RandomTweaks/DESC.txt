@@ -3,7 +3,7 @@
 [center]A handful of quality-of-life tweaks: instant butchering, a wish-list stocking top-up for the Wishing Shelf, hiding the full suit and backpack through transmog, and configurable player stat adjustments.[/center]
 
 [size=5][b]Requirements[/b][/size]
-UE4SS 1.23.0 (Nexus; commit 35d1795d). Tested on this version only.
+Built against UE4SS 3.0.1 (commit 1ba38db4) for Abiotic Factor 1.5.0 (Modding Update).
 
 [size=5][b]Installation[/b][/size]
 [list=1]

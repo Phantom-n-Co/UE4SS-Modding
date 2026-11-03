@@ -29,3 +29,9 @@ bool writeDefaultConfig(const std::wstring& path, const std::vector<std::pair<co
 
 // Load <path> if present and parseable; otherwise write defaults and load those.
 std::vector<ConfigEntry> loadConfig(const std::wstring& path, const std::vector<std::pair<const wchar_t*, int>>& defaults);
+
+// Root-level `dumpItems = true` in config text (any other value or absence = false).
+bool parseDumpItemsFlag(const std::wstring& content);
+
+// parseDumpItemsFlag on the file at <path>; false if it can't be read.
+bool loadDumpItemsFlag(const std::wstring& path);

@@ -138,6 +138,9 @@ bool writeDefaultConfig(const std::wstring& path, const std::vector<std::pair<co
     out << L"-- Format: [pattern] = maxStackSize, longest pattern wins.\n";
     out << L"-- Items not matched by any pattern keep their vanilla stack size.\n";
     out << L"return {\n";
+    out << L"    -- true: write item_dump.lua next to this file (every item's ID, name, stack size, ...)\n";
+    out << L"    -- on startup and on each world load. Use it to find IDs for the patterns below.\n";
+    out << L"    dumpItems = false,\n";
     for (const auto& [p, s] : sorted) {
         out << L"    [\"" << p << L"\"] = " << s << L",\n";
     }
@@ -178,4 +181,34 @@ std::vector<ConfigEntry> loadConfig(const std::wstring& path, const std::vector<
         return buildConfig(toWStringPairs(defaults));
     }
     return buildConfig(parsed);
+}
+
+bool parseDumpItemsFlag(const std::wstring& content) {
+    const std::wregex flagRe(L"^\\s*dumpItems\\s*=\\s*(true|false)\\s*,?\\s*$");
+    std::wistringstream ss(content);
+    std::wstring line;
+    bool value = false;
+    while (std::getline(ss, line)) {
+        const auto comment = line.find(L"--");
+        if (comment != std::wstring::npos) {
+            line = line.substr(0, comment);
+        }
+        if (!line.empty() && line.back() == L'\r') {
+            line.pop_back();
+        }
+        std::wsmatch m;
+        if (std::regex_match(line, m, flagRe)) {
+            value = m[1].str() == L"true"; // last assignment wins, like Lua
+        }
+    }
+    return value;
+}
+
+bool loadDumpItemsFlag(const std::wstring& path) {
+    std::wifstream in(path);
+    if (!in) {
+        return false;
+    }
+    const std::wstring content{std::istreambuf_iterator<wchar_t>(in), std::istreambuf_iterator<wchar_t>()};
+    return parseDumpItemsFlag(content);
 }

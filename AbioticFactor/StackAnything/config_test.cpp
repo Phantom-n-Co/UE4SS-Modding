@@ -64,7 +64,22 @@ static void test_write_and_reload() {
     assert(raw.size() == 2);
     // sorted alphabetically, like the Lua generator
     assert(raw[0].first == L"^TV$");
+    // the written dumpItems switch defaults to off and is not parsed as a pattern
+    assert(content.find(L"dumpItems = false,") != std::wstring::npos);
+    assert(!parseDumpItemsFlag(content));
+    assert(!loadDumpItemsFlag(path));
     std::remove("config_test_tmp.lua");
+}
+
+static void test_dump_items_flag() {
+    assert(parseDumpItemsFlag(L"return {\n    dumpItems = true,\n    [\"fish_.+\"] = 20,\n}\n"));
+    assert(parseDumpItemsFlag(L"return {\r\n  dumpItems=true -- on\r\n}\r\n"));
+    assert(!parseDumpItemsFlag(L"return {\n    dumpItems = false,\n}\n"));
+    assert(!parseDumpItemsFlag(L"return {\n    -- dumpItems = true,\n}\n"));
+    assert(!parseDumpItemsFlag(L"return {\n    [\"fish_.+\"] = 20,\n}\n")); // absent = off
+    assert(!loadDumpItemsFlag(L"Z:\\nonexistent\\dir\\config.lua"));
+    const auto raw = parseConfigText(L"return {\n    dumpItems = true,\n    [\"fish_.+\"] = 20,\n}\n");
+    assert(raw.size() == 1 && raw[0].first == L"fish_.+");
 }
 
 static void test_load_fallback_on_unwritable_path() {
@@ -98,6 +113,7 @@ int main() {
     test_invalid_pattern_dropped();
     test_defaults_load_and_match();
     test_write_and_reload();
+    test_dump_items_flag();
     test_load_fallback_on_unwritable_path();
     test_load_fallback_on_degenerate_file();
     std::printf("config_test: ALL PASS\n");

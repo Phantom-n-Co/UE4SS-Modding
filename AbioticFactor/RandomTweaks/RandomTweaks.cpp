@@ -173,12 +173,11 @@ static UObject* getObjectProperty(UObject* obj, const wchar_t* name) {
     return objProp->GetObjectPropertyValue(prop->ContainerPtrToValuePtr<void>(obj));
 }
 
-// Mirror of the game's FAbiotic_InventoryItemSlotStruct (size 0x98), read
-// directly off CurrentInventory. Layout matches StackAnything's in-game-proven
-// view; sizes are compile-time-asserted so a game update breaks the build
-// instead of silently reading garbage.
+// Mirror of the game's FAbioticInventoryItemSlot (size 0x98), read directly off
+// CurrentInventory. itemLayout() verifies it against reflection and disables the
+// Wishing Shelf top-up (the only writer) on a mismatch.
 struct FAbioticSlotRowHandle {
-    void* DataTable;   // 0x00
+    void* VTable;      // 0x00 FRowHandle is polymorphic: not a UDataTable*, never dereference
     FName RowName;     // 0x08
 };
 struct FAbioticSlotChangeable {
@@ -197,15 +196,68 @@ static_assert(sizeof(FAbioticSlotChangeable) == 0x88, "changeable size");
 static_assert(offsetof(FAbioticSlotChangeable, CurrentStack) == 0x20, "CurrentStack offset");
 static_assert(sizeof(FAbioticSlotView) == 0x98, "slot size");
 
-// Max stack of the item in `slot`, from its own DataTable row (StackSize_47 at
-// 0x238, StackAnything-proven layout). 0 if the table/row can't be resolved.
+static int32_t structFieldOffset(UStruct* owner, const wchar_t* name) {
+    if (!owner) {
+        return -1;
+    }
+    for (FProperty* prop : TFieldRange<FProperty>(owner, EFieldIterationFlags::IncludeSuper)) {
+        if (prop->GetName() == name) {
+            return prop->GetOffset_ForInternal();
+        }
+    }
+    return -1;
+}
+
+// Resolved once from reflection: FAbioticInventoryItem::StackSize, and whether
+// FAbioticSlotView still matches the game's slot struct.
+struct ItemLayout {
+    bool resolved = false;
+    bool slotMirrorValid = false;
+    int32_t rowStackSize = -1;
+};
+static ItemLayout g_itemLayout;
+
+static const ItemLayout& itemLayout() {
+    if (g_itemLayout.resolved) {
+        return g_itemLayout;
+    }
+    auto* slot = UObjectGlobals::StaticFindObject<UScriptStruct*>(
+        nullptr, nullptr, STR("/Script/AbioticFactor.AbioticInventoryItemSlot"));
+    auto* changeable = UObjectGlobals::StaticFindObject<UScriptStruct*>(
+        nullptr, nullptr, STR("/Script/AbioticFactor.AbioticInventoryChangeableData"));
+    auto* row = UObjectGlobals::StaticFindObject<UScriptStruct*>(
+        nullptr, nullptr, STR("/Script/AbioticFactor.AbioticInventoryItem"));
+    if (!slot || !changeable || !row) {
+        return g_itemLayout; // not loaded yet; retry on the next call
+    }
+    g_itemLayout.resolved = true;
+    g_itemLayout.rowStackSize = structFieldOffset(row, STR("StackSize"));
+    g_itemLayout.slotMirrorValid =
+        slot->GetStructureSize() == static_cast<int32_t>(sizeof(FAbioticSlotView)) &&
+        structFieldOffset(slot, STR("ChangeableData")) == static_cast<int32_t>(offsetof(FAbioticSlotView, Changeable)) &&
+        changeable->GetStructureSize() == static_cast<int32_t>(sizeof(FAbioticSlotChangeable)) &&
+        structFieldOffset(changeable, STR("CurrentStack")) == static_cast<int32_t>(offsetof(FAbioticSlotChangeable, CurrentStack));
+    if (!g_itemLayout.slotMirrorValid || g_itemLayout.rowStackSize < 0) {
+        RC::Output::send<RC::LogLevel::Error>(
+            STR("[RandomTweaks] Inventory slot layout changed (game update?); Wishing Shelf top-up disabled\n"));
+    }
+    return g_itemLayout;
+}
+
+// Max stack of the item in `slot`, from its ItemTable_Global row. 0 if the row
+// can't be resolved (callers then don't clamp).
 static int32_t getMaxStack(const FAbioticSlotView& slot) {
-    auto* dt = static_cast<UDataTable*>(slot.ItemDataTable.DataTable);
-    if (!dt || slot.ItemDataTable.RowName.IsNone()) {
+    const ItemLayout& layout = itemLayout();
+    if (layout.rowStackSize < 0 || slot.ItemDataTable.RowName.IsNone()) {
+        return 0;
+    }
+    auto* dt = UObjectGlobals::StaticFindObject<UDataTable*>(
+        nullptr, nullptr, STR("/Game/Blueprints/Items/ItemTable_Global.ItemTable_Global"));
+    if (!dt) {
         return 0;
     }
     if (uint8_t* row = dt->FindRowUnchecked(slot.ItemDataTable.RowName)) {
-        return *reinterpret_cast<int32_t*>(row + 0x238);
+        return *reinterpret_cast<int32_t*>(row + layout.rowStackSize);
     }
     return 0;
 }
@@ -241,7 +293,12 @@ static const WishingShelfStatsOffsets& getWishingShelfStatsOffsets(UDataTable* d
 }
 
 // The game's WorldFlagSubsystem instance (a UWorldSubsystem, one per world).
+// Cached weakly: the full object scan only reruns when the world changes.
 static UObject* getWorldFlagSubsystem() {
+    static FWeakObjectPtr s_cached;
+    if (UObject* cached = s_cached.Get()) {
+        return cached;
+    }
     UObject* found = nullptr;
     UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> RC::LoopAction {
         if (obj->GetClassPrivate()->GetPathName().find(L"WorldFlagSubsystem") != std::wstring::npos &&
@@ -251,6 +308,7 @@ static UObject* getWorldFlagSubsystem() {
         }
         return RC::LoopAction::Continue;
     });
+    s_cached = FWeakObjectPtr(found);
     return found;
 }
 
@@ -274,7 +332,9 @@ static bool worldHasFlag(UObject* worldContext, const uint8_t* flagHandle) {
                 objProp->SetObjectPropertyValue(at, worldContext);
             }
         } else if (name == L"WorldFlag") {
-            std::memcpy(at, flagHandle, 0x20);
+            // FWorldFlagRowHandle (0x10 since v1.5.0, was 0x20): copy exactly the
+            // param's size, or the copy runs past the end of the params buffer.
+            std::memcpy(at, flagHandle, static_cast<size_t>(prop->GetElementSize()));
         } else if (name == L"ReturnValue") {
             auto* b = reinterpret_cast<bool*>(at);
             *b = false;
@@ -317,7 +377,7 @@ static int32_t getWishAmount(UObject* worldContext, FName rowName) {
     if (max <= min) {
         return min;
     }
-    std::mt19937 rng{std::random_device{}()};
+    static std::mt19937 rng{std::random_device{}()};
     return min + static_cast<int32_t>(rng() % static_cast<uint32_t>(max - min + 1));
 }
 
@@ -370,16 +430,19 @@ static UObject* scanShelfFor(UObject* stocking) {
 }
 
 static UObject* getShelfFor(UObject* stocking) {
+    // Drop entries whose stocking is gone; otherwise the cache only ever grows.
+    std::erase_if(g_shelfCache, [](const ShelfCache& e) { return !e.stocking.Get(); });
     for (auto& entry : g_shelfCache) {
         if (entry.stocking.Get() != stocking) {
             continue;
         }
-        if (UObject* shelf = entry.shelf.Get()) {
-            if (readStocking(shelf) == stocking) {
-                return shelf;
-            }
+        if (UObject* shelf = entry.shelf.Get(); shelf && readStocking(shelf) == stocking) {
+            return shelf;
         }
-        entry = {};
+        // Shelf gone or relinked (or never found): rescan into this same entry.
+        UObject* shelf = scanShelfFor(stocking);
+        entry.shelf = FWeakObjectPtr(shelf);
+        return shelf;
     }
     UObject* shelf = scanShelfFor(stocking);
     g_shelfCache.push_back({FWeakObjectPtr(stocking), FWeakObjectPtr(shelf)});
@@ -462,6 +525,9 @@ static void refreshInventory(UObject* inventory) {
 static void post_IsInventorySlotEmpty(UnrealScriptFunctionCallableContext& Ctx, void*) {
     if (!g_config.wishingShelfTopUp || !Ctx.Context || !calledFromTrySpawnGifts(Ctx)) {
         return;
+    }
+    if (!itemLayout().slotMirrorValid) {
+        return; // slot layout unverified: never write CurrentStack blind
     }
 
     UObject* stocking = Ctx.Context->GetOuterPrivate();
