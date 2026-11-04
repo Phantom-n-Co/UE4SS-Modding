@@ -13,9 +13,7 @@ Built against UE4SS 3.0.1 (commit 1ba38db4) for Abiotic Factor 1.5.0 (Modding Up
 [size=5][b]Configuration[/b][/size]
 Edit [font=courier]Mods/StackAnything/config.lua[/font].
 
-On the first run (or if [font=courier]config.lua[/font] is missing or empty) the mod writes a default config covering the built-in item categories, generated from the built-in defaults.
-Delete [font=courier]config.lua[/font] and restart to regenerate the defaults.
-Edit [font=courier]config.lua[/font] to customize; it is never overwritten while it exists.
+On the first run (or if [font=courier]config.lua[/font] is missing or empty) the mod writes a default config covering the built-in item categories, generated from the built-in defaults. Delete [font=courier]config.lua[/font] and restart to regenerate the defaults. Edit [font=courier]config.lua[/font] to customize; it is never overwritten while it exists.
 
 The config maps regular expressions to max stack sizes. Longer (more specific) patterns win; items not matched by any pattern keep their vanilla stack size. Items added by official (mod.io) mods are matched too.
 
@@ -91,4 +89,4 @@ Paintings & posters       5
 Noisy (TVs, arcades)      5
 Crafting benches          5
 Electric                  5
-Misc deployable          5[/code]
+Misc deployable           5[/code]
