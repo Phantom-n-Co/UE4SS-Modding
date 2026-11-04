@@ -3,9 +3,12 @@
 
   tools/nexus_release.py lookup [--write]      list your Abiotic Factor mods/files; --write fills tools/nexus.json
   tools/nexus_release.py pull-changelogs       write <Mod>/CHANGELOG.md from the Nexus changelog (refuses to overwrite)
-  tools/nexus_release.py publish <Mod> [opts]  build + test + zip + upload a new version of <Mod>'s file
+  tools/nexus_release.py desc <Mod> [--push]   diff <Mod>/DESC.txt against the mod page; --push uploads it
+  tools/nexus_release.py publish <Mod> [opts]  build + test + zip + upload a new version of <Mod>'s file (+ desc sync)
 
 The changelog for a release is the `## <version>` section of AbioticFactor/<Mod>/CHANGELOG.md.
+DESC.txt is pushed to the mod page only if the page is unchanged since the last sync (hash in nexus.json),
+so edits made on the website are never overwritten; --force-desc overrides after reviewing the diff.
 
 Per-mod release tags: <Mod>-v<version>. The version comes from ModVersion in <Mod>/dllmain.cpp.
 API key: $NEXUSMODS_API_KEY, else libsecret (`secret-tool store --label='Nexus Mods API key' service nexusmods account api`).
@@ -13,6 +16,7 @@ Stdlib only.
 """
 import argparse
 import base64
+import difflib
 import html
 import hashlib
 import json
@@ -142,6 +146,76 @@ def load_config(required=True):
     return {}
 
 
+# ---------------------------------------------------------------- description
+
+def save_config(cfg):
+    CONFIG.write_text(json.dumps(cfg, indent=2) + "\n")
+
+
+def page_text(raw):
+    """Mod page description as plain BBCode: Nexus stores line breaks as `\\n<br />` and HTML entities."""
+    raw = raw.replace("\r\n", "\n").replace("\n<br />", "\n").replace("<br />", "\n")
+    return html.unescape(raw).strip()
+
+
+def local_desc(mod):
+    return (MODS_DIR / mod / "DESC.txt").read_text(encoding="utf-8").replace("\r\n", "\n").strip()
+
+
+def sha(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def desc_diff(remote, local):
+    return "\n".join(difflib.unified_diff(remote.splitlines(), local.splitlines(),
+                                         "nexus", "DESC.txt", lineterm="", n=1))
+
+
+def check_desc(mod, entry, key, force):
+    """Abort if the page changed on the website since the last sync. Returns True if a push is needed."""
+    remote = page_text(api("GET", f"/mods/{entry['mod_id']}", key)["data"]["description"])
+    local = local_desc(mod)
+    base = entry.get("desc_remote_sha256")
+    if not force:
+        if base is None:
+            die(f"{mod}: no description sync baseline. Copy any website-only edits into DESC.txt, then run "
+                f"`desc {mod} --push --force-desc`. Diff (Nexus drops the newline after [/list]):\n"
+                f"{desc_diff(remote, local)}")
+        if sha(remote) != base:
+            die(f"{mod}: the mod page was edited on the website since the last sync. Copy those edits into "
+                f"DESC.txt, then rerun with --force-desc. Diff:\n{desc_diff(remote, local)}")
+    return force or sha(local) != entry.get("desc_local_sha256")
+
+
+def push_desc(mod, entry, key, cfg):
+    local = local_desc(mod)
+    api("PATCH", f"/mods/{entry['mod_id']}", key, {"description": local})
+    remote = page_text(api("GET", f"/mods/{entry['mod_id']}", key)["data"]["description"])
+    entry["desc_local_sha256"] = sha(local)
+    entry["desc_remote_sha256"] = sha(remote)
+    cfg[mod] = entry
+    save_config(cfg)
+    print(f"description pushed; sync hashes saved to {CONFIG.relative_to(ROOT)} (commit it)")
+
+
+def cmd_desc(args):
+    cfg = load_config()
+    entry = cfg.get(args.mod) or die(f"{args.mod} not in {CONFIG.name}")
+    key = api_key()
+    if not args.push:
+        remote = page_text(api("GET", f"/mods/{entry['mod_id']}", key)["data"]["description"])
+        base = entry.get("desc_remote_sha256")
+        state = ("no sync baseline" if base is None else
+                 "edited on the website since the last sync" if sha(remote) != base else "unchanged since the last sync")
+        print(f"mod page: {state}; DESC.txt {'unchanged' if sha(local_desc(args.mod)) == entry.get('desc_local_sha256') else 'changed'} since the last push")
+        print(desc_diff(remote, local_desc(args.mod)) or "no differences")
+        return
+    if check_desc(args.mod, entry, key, args.force_desc):
+        push_desc(args.mod, entry, key, cfg)
+    else:
+        print("DESC.txt unchanged since the last push; nothing to do")
+
+
 # ---------------------------------------------------------------- publish
 
 def mod_version(mod):
@@ -249,7 +323,8 @@ def cmd_publish(args):
     mod = args.mod
     if not (MODS_DIR / mod / "dllmain.cpp").exists():
         die(f"unknown mod {mod!r}")
-    entry = load_config(required=not args.dry_run).get(mod, {})
+    cfg = load_config(required=not args.dry_run)
+    entry = cfg.get(mod, {})
     for k in ("mod_id", "file_id"):
         if not entry.get(k) and not args.dry_run:
             die(f"{CONFIG.name}: {mod}.{k} missing; run `lookup --write`")
@@ -274,6 +349,8 @@ def cmd_publish(args):
         latest = max((v["version"] for v in versions if v["category"] != "removed"), key=version_key, default=None)
         if latest is not None and version_key(version) <= version_key(latest):
             die(f"{mod} {version} is not newer than {latest} on Nexus: bump ModVersion in {mod}/dllmain.cpp")
+        # check before uploading so a website-edited page stops the release, not just the desc push
+        push_description = not args.no_desc and check_desc(mod, entry, key, args.force_desc)
 
     dll = build_and_test(mod)
     archive = package(mod, version, dll)
@@ -301,6 +378,8 @@ def cmd_publish(args):
     for e in entries:  # one POST per entry, matching how Nexus stores them
         api("POST", f"/mods/{entry['mod_id']}/changelogs", key, {"version": version, "changelog": e})
     print(f"changelog added ({len(entries)} entries)")
+    if push_description:
+        push_desc(mod, entry, key, cfg)
 
     git("tag", "-a", tag, "-m", f"{mod} {version}\n\n{changelog}")
     print(f"tagged {tag}")
@@ -325,7 +404,14 @@ def main():
     pb.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     pb.add_argument("--push-tag", action="store_true", help="push the release tag to origin")
     pb.add_argument("--allow-dirty", action="store_true", help="allow uncommitted changes in the mod dir")
+    pb.add_argument("--no-desc", action="store_true", help="don't sync DESC.txt to the mod page")
+    pb.add_argument("--force-desc", action="store_true", help="push DESC.txt even if the page changed on the website")
     pb.set_defaults(func=cmd_publish)
+    ds = sub.add_parser("desc", help="diff or push DESC.txt to the mod page")
+    ds.add_argument("mod")
+    ds.add_argument("--push", action="store_true", help="upload DESC.txt (refused if the page changed on the website)")
+    ds.add_argument("--force-desc", action="store_true", help="push even without a baseline or after website edits")
+    ds.set_defaults(func=cmd_desc)
     args = p.parse_args()
     args.func(args)
 

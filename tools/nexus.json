@@ -3,12 +3,16 @@
     "mod_id": "27539330302236",
     "file_id": "7781586",
     "file_name": "RandomTweaks",
-    "game_scoped_id": "284"
+    "game_scoped_id": "284",
+    "desc_local_sha256": "ab6bc5d8af5b7b8e062c716c2f3831a0b8c6649c7814ee630a52f26fd1d4c56c",
+    "desc_remote_sha256": "ab6bc5d8af5b7b8e062c716c2f3831a0b8c6649c7814ee630a52f26fd1d4c56c"
   },
   "StackAnything": {
     "mod_id": "27539330302211",
     "file_id": "7632410",
     "file_name": "StackAnything",
-    "game_scoped_id": "259"
+    "game_scoped_id": "259",
+    "desc_local_sha256": "bbfda464f961a5300a7a9b628dbeb63f2e1601555a7ed0c46aed955c8c513fa1",
+    "desc_remote_sha256": "bbfda464f961a5300a7a9b628dbeb63f2e1601555a7ed0c46aed955c8c513fa1"
   }
 }
