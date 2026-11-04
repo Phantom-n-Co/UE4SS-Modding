@@ -218,7 +218,7 @@ def package(mod, version, dll):
     archive = DIST / f"{mod}-{version}.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(dll, f"{mod}/dlls/{mod}.dll")
-        z.write(MODS_DIR / mod / "enabled.txt", f"{mod}/enabled.txt")
+        z.writestr(f"{mod}/enabled.txt", "")  # UE4SS only checks that it exists
     print(f"packaged {archive.relative_to(ROOT)} ({archive.stat().st_size} bytes)")
     return archive
 
@@ -302,11 +302,12 @@ def cmd_publish(args):
         api("POST", f"/mods/{entry['mod_id']}/changelogs", key, {"version": version, "changelog": e})
     print(f"changelog added ({len(entries)} entries)")
 
-    run(["git", "tag", "-a", tag, "-m", f"{mod} {version}\n\n{changelog}"])
+    git("tag", "-a", tag, "-m", f"{mod} {version}\n\n{changelog}")
+    print(f"tagged {tag}")
     if args.push_tag:
         run(["git", "push", "origin", tag])
     else:
-        print(f"tag {tag} created locally; push with: git push origin {tag}")
+        print(f"push the tag with: git push origin {tag}")
 
 
 def main():
