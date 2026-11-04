@@ -63,7 +63,7 @@ class StackAnything : public RC::CppUserModBase {
 public:
     StackAnything() {
         ModName = STR("StackAnything");
-        ModVersion = STR("3.0");
+        ModVersion = STR("3.1.0");
         ModDescription = STR("Stack anything");
         ModAuthors = STR("WhitePhantom02");
     }
