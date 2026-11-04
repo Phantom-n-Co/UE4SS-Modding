@@ -12,10 +12,14 @@
 #include <Unreal/SoftObjectPtr.hpp>
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cwchar>
 #include <cstring>
 #include <cwctype>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <random>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -141,6 +145,7 @@ struct GameLayout {
     UScriptStruct* itemRowStruct = nullptr;  // /Script/AbioticFactor.AbioticInventoryItem
     int32_t rowStackSize = -1;               // FAbioticInventoryItem::StackSize
     int32_t rowEquipSlot = -1;               // FAbioticInventoryItem::EquipmentData.EquipSlot
+    UScriptStruct* slotStruct = nullptr;     // /Script/AbioticFactor.AbioticInventoryItemSlot (deep copies)
     bool mirrorsValid = false;               // GameTypes.hpp mirrors match the game
 };
 GameLayout g_layout;
@@ -207,6 +212,8 @@ bool initGameLayout() {
                       {SA_FIELD(FAbioticItemInput, Count)});
     ok &= checkStruct(STR("/Script/AbioticFactor.SortedItem"), sizeof(FSortedItem),
                       {SA_FIELD(FSortedItem, RowName), SA_FIELD(FSortedItem, SourceIndex)});
+    g_layout.slotStruct = findScriptStruct(STR("/Script/AbioticFactor.AbioticInventoryItemSlot"));
+    ok &= g_layout.slotStruct != nullptr;
     g_layout.mirrorsValid = ok;
 
     if (!ok) {
@@ -658,11 +665,26 @@ struct SplitTarget {
 
 }
 
+static bool sameString(const FString& a, const FString& b);
+static std::wstring getVariantName(const FAbioticInventoryChangeableData& c);
+
+// Liquid level for stacking comparisons. Weapon-fired projectiles carry the class
+// default LiquidLevel -1 (no liquid) until the dropped item's BeginPlay resets it
+// to 0, and an instant auto-pickup (ProjectilePickup perk) can run before that:
+// treat "-1, no liquid" as the "0, no liquid" every inventory item has.
+static int32_t effectiveLiquidLevel(const FAbioticInventoryChangeableData& c) {
+    return c.CurrentLiquid == ELiquidType::Empty && c.LiquidLevel < 0 ? 0 : c.LiquidLevel;
+}
+
+// A slot that can take `amountToAdd` items shaped like `item`: a matching stack
+// (same row, liquid, soup recipe and texture variant) with room, else an empty slot.
 static SplitTarget findSplitTarget(AAbiotic_PlayerCharacter_C* player,
                                    UAbiotic_InventoryComponent_C* givenInventory,
-                                   const FName& rowName, int32_t liquidType, int32_t liquidLevel,
+                                   const FAbioticInventoryItemSlot& item,
                                    int32_t amountToAdd, UAbiotic_InventoryComponent_C* skipInventory,
-                                   int32_t skipIndex) {
+                                   int32_t skipIndex, bool mergeOnly = false) {
+    const FName& rowName = item.ItemDataTable.RowName;
+    const FAbioticInventoryChangeableData& want = item.ChangeableData;
     std::vector<UAbiotic_InventoryComponent_C*> candidates;
     if (givenInventory) {
         candidates.push_back(givenInventory);
@@ -693,11 +715,16 @@ static SplitTarget findSplitTarget(AAbiotic_PlayerCharacter_C* player,
             FAbioticInventoryChangeableData& c = slot.ChangeableData;
             const int32_t maxStack = getMaxStack(slot);
             if (maxStack > 0 && c.CurrentStack > 0 && c.CurrentStack + amountToAdd <= maxStack &&
-                c.LiquidLevel == liquidLevel &&
-                static_cast<int32_t>(c.CurrentLiquid) == liquidType) {
+                effectiveLiquidLevel(c) == effectiveLiquidLevel(want) && c.CurrentLiquid == want.CurrentLiquid &&
+                sameString(c.PlayerMadeString, want.PlayerMadeString) &&
+                getVariantName(c) == getVariantName(want)) {
                 return {.inventory = inv, .index = i, .mergeInto = true};
             }
         }
+    }
+
+    if (mergeOnly) {
+        return {.inventory = nullptr, .index = -1, .mergeInto = false};
     }
 
     for (UAbiotic_InventoryComponent_C* inv : candidates) {
@@ -768,64 +795,174 @@ static void refundSourceContainer(UObject* source, AAbiotic_PlayerCharacter_C* p
     }
 }
 
-// Moves one container of a split stack into targetSlot (merge, or a new single).
-static void moveOneTo(FAbioticInventoryItemSlot& targetSlot, bool mergeInto,
-                      const FAbioticInventoryItemSlot& source, int32_t liquidLevel, uint8_t liquidType) {
+static bool sameString(const FString& a, const FString& b) {
+    const int32_t len = a.Len();
+    return len == b.Len() && (len == 0 || std::wmemcmp(*a, *b, static_cast<size_t>(len)) == 0);
+}
+
+// Vanilla gives every item that lands in an empty slot its own AssetID (a GUID
+// in EGuidFormats::Digits form). The stove finds held cookware by AssetID and
+// never matches "-1", so a split-off single needs a fresh one.
+static FString newAssetId() {
+    static std::mt19937_64 rng{std::random_device{}()};
+    wchar_t buf[33];
+    const uint64_t hi = rng();
+    const uint64_t lo = rng();
+    std::swprintf(buf, 33, L"%016llX%016llX", static_cast<unsigned long long>(hi), static_cast<unsigned long long>(lo));
+    return FString(static_cast<const TCHAR*>(buf));
+}
+
+// Deep copy of an inventory slot (FStrings, tag and property arrays), owned by
+// the engine allocator through the slot's UScriptStruct.
+class SlotCopy {
+public:
+    SlotCopy() = default;
+    SlotCopy(const SlotCopy&) = delete;
+    SlotCopy& operator=(const SlotCopy&) = delete;
+    SlotCopy(SlotCopy&& o) noexcept : m_storage(std::move(o.m_storage)) {}
+    ~SlotCopy() { reset(); }
+
+    bool capture(const FAbioticInventoryItemSlot& slot) {
+        reset();
+        if (!g_layout.slotStruct) {
+            return false;
+        }
+        m_storage = std::make_unique<uint64_t[]>((sizeof(FAbioticInventoryItemSlot) + 7) / 8);
+        g_layout.slotStruct->InitializeStruct(m_storage.get());
+        g_layout.slotStruct->CopyScriptStruct(m_storage.get(), &slot);
+        return true;
+    }
+    const FAbioticInventoryItemSlot* get() const {
+        return reinterpret_cast<const FAbioticInventoryItemSlot*>(m_storage.get());
+    }
+    FAbioticInventoryItemSlot* get() {
+        return reinterpret_cast<FAbioticInventoryItemSlot*>(m_storage.get());
+    }
+    void reset() {
+        if (m_storage && g_layout.slotStruct) {
+            g_layout.slotStruct->DestroyStruct(m_storage.get());
+        }
+        m_storage.reset();
+    }
+
+private:
+    std::unique_ptr<uint64_t[]> m_storage;
+};
+
+// Moves `count` items shaped like `item` into targetSlot (merge, or a new stack
+// that is a full copy of `item` with its own AssetID).
+static void moveInto(FAbioticInventoryItemSlot& targetSlot, bool mergeInto,
+                     const FAbioticInventoryItemSlot& item, int32_t count) {
     if (mergeInto) {
-        targetSlot.ChangeableData.CurrentStack += 1;
+        targetSlot.ChangeableData.CurrentStack += count;
         return;
     }
-    targetSlot.ItemDataTable = source.ItemDataTable;
-    targetSlot.ChangeableData.CurrentStack = 1;
-    targetSlot.ChangeableData.CurrentItemDurability = source.ChangeableData.CurrentItemDurability;
-    targetSlot.ChangeableData.MaxItemDurability = source.ChangeableData.MaxItemDurability;
-    targetSlot.ChangeableData.LiquidLevel = liquidLevel;
-    targetSlot.ChangeableData.CurrentLiquid = static_cast<ELiquidType::Type>(liquidType);
+    g_layout.slotStruct->CopyScriptStruct(&targetSlot, &item);
+    targetSlot.ChangeableData.CurrentStack = count;
+    targetSlot.ChangeableData.AssetID = newAssetId();
+}
+
+// Liquid edits through Server_TryChangeValueInLiquidContainer apply to the whole
+// slot, so on a stack they fill, drain or flavor every item at once. The pre-hook
+// snapshots the slot; the post-hook leaves the one changed item in the slot and
+// moves the rest, unchanged, to another stack. The slot must keep the changed
+// item: vanilla also wrote the new liquid state into the held item actor
+// (ItemInHand_BP), and the next drink/fill computes from that copy.
+static void syncHeldItem(UObject* player, UAbiotic_InventoryComponent_C* inventory, int32_t slotIndex);
+
+static int32_t g_tryFillFromDepth = 0; // > 0 while TryFill_FROM_PlayerContainer runs
+
+namespace {
+struct LiquidEditFrame {
+    UAbiotic_InventoryComponent_C* inventory = nullptr;
+    int32_t slotIndex = -1;
+    SlotCopy before;
+};
+std::vector<LiquidEditFrame> g_liquidEdits;
+}
+
+static void pre_TryChangeValueInLiquidContainer(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    LiquidEditFrame frame;
+    auto** inventoryParam = param<UAbiotic_InventoryComponent_C*>(Ctx, STR("Inventory"));
+    auto* slotIndexParam = param<int32_t>(Ctx, STR("SlotIndex"));
+    if (inventoryParam && *inventoryParam && slotIndexParam && *slotIndexParam >= 0) {
+        auto* slots = slotsOf(*inventoryParam);
+        if (slots && *slotIndexParam < slots->Num()) {
+            const FAbioticInventoryItemSlot& slot = (*slots)[*slotIndexParam];
+            if (!isSlotEmpty(slot) && slot.ChangeableData.CurrentStack > 1 && frame.before.capture(slot)) {
+                frame.inventory = *inventoryParam;
+                frame.slotIndex = *slotIndexParam;
+            }
+        }
+    }
+    g_liquidEdits.push_back(std::move(frame)); // always push: the post-hook always pops
 }
 
 static void post_TryChangeValueInLiquidContainer(UnrealScriptFunctionCallableContext& Ctx, void*) {
-    auto** inventoryParam = param<UAbiotic_InventoryComponent_C*>(Ctx, STR("Inventory"));
-    auto* slotIndexParam = param<int32_t>(Ctx, STR("SlotIndex"));
-    auto* newLiquidParam = param<int32_t>(Ctx, STR("NewLiquidValue"));
-    auto* liquidTypeParam = param<uint8_t>(Ctx, STR("LiquidType"));
-    auto* optionalRowParam = param<FRowHandle>(Ctx, STR("OptionalItemRow"));
-    if (!inventoryParam || !slotIndexParam || !newLiquidParam || !liquidTypeParam || !optionalRowParam) {
+    if (g_liquidEdits.empty()) {
         return;
     }
-    UAbiotic_InventoryComponent_C* inventory = *inventoryParam;
-    if (!inventory) {
+    LiquidEditFrame frame = std::move(g_liquidEdits.back());
+    g_liquidEdits.pop_back();
+
+    auto* newLiquidParam = param<int32_t>(Ctx, STR("NewLiquidValue"));
+    auto* liquidTypeParam = param<uint8_t>(Ctx, STR("LiquidType"));
+    if (!frame.inventory || !newLiquidParam || !liquidTypeParam) {
         return;
     }
     auto* player = reinterpret_cast<AAbiotic_PlayerCharacter_C*>(Ctx.Context);
-    const int32_t slotIndex = *slotIndexParam;
+    UAbiotic_InventoryComponent_C* inventory = frame.inventory;
+    const int32_t slotIndex = frame.slotIndex;
     const int32_t newLiquidValue = *newLiquidParam;
-    if (slotIndex < 0) {
-        return;
-    }
+    const int32_t liquidType = *liquidTypeParam;
     g_pendingRefund = {};
-
-    if (!isEmptyRowName(optionalRowParam->RowName)) {
-        return; // row-converting fill (e.g. empty bowl -> soup): don't split
-    }
 
     auto* slots = slotsOf(inventory);
     if (!slots || slotIndex >= slots->Num()) {
         return;
     }
+    const FAbioticInventoryItemSlot& before = *frame.before.get();
+    const int32_t stack = before.ChangeableData.CurrentStack;
     FAbioticInventoryItemSlot& sourceSlot = (*slots)[slotIndex];
     FAbioticInventoryChangeableData& changeable = sourceSlot.ChangeableData;
 
-    const int32_t liquidType = *liquidTypeParam;
-    if (isEnergyLiquidType(liquidType)) {
+    // Item.Pot rows are swapped for one empty pot (CurrentStack = 1): move the
+    // other stack-1 pots, unchanged, to another slot.
+    if (sourceSlot.ItemDataTable.RowName != before.ItemDataTable.RowName) {
+        if (isSlotEmpty(sourceSlot)) {
+            return;
+        }
+        SplitTarget target = findSplitTarget(player, inventory, before, stack - 1, inventory, slotIndex);
+        if (!target.inventory) {
+            // No room: keep the pots and give up the converted single.
+            g_layout.slotStruct->CopyScriptStruct(&sourceSlot, &before);
+            changeable.CurrentStack = stack - 1;
+            refreshInventory(inventory);
+            RC::Output::send<RC::LogLevel::Warning>(
+                STR("[StackAnything] No free slot for the rest of a pot stack; converted pot discarded\n"));
+            return;
+        }
+        moveInto((*slotsOf(target.inventory))[target.index], target.mergeInto, before, stack - 1);
+        refreshInventory(inventory);
+        if (target.inventory != inventory) {
+            refreshInventory(target.inventory);
+        }
         return;
     }
 
-    const int32_t stack = changeable.CurrentStack;
-    if (stack <= 1) {
+    if (isEnergyLiquidType(liquidType) || isEnergyLiquidType(before.ChangeableData.CurrentLiquid)) {
         return;
     }
+    if (changeable.LiquidLevel == before.ChangeableData.LiquidLevel &&
+        changeable.CurrentLiquid == before.ChangeableData.CurrentLiquid &&
+        sameString(changeable.PlayerMadeString, before.ChangeableData.PlayerMadeString)) {
+        return; // nothing changed
+    }
 
-    if (g_pendingDrain.player == player &&
+    // g_pendingDrain is set by every IsHoldingLiquidContainer call (looking at a
+    // sink, barrel or stove) and can be stale; only a drain that really runs
+    // inside TryFill_FROM_PlayerContainer is left to that function's post-hook.
+    if (g_tryFillFromDepth > 0 && g_pendingDrain.player == player &&
         g_pendingDrain.inventory == inventory && g_pendingDrain.slotIndex == slotIndex) {
         if (newLiquidValue < g_pendingDrain.preLiquid) {
             return; // drain direction: handled in TryFill_FROM_PlayerContainer post-hook
@@ -833,31 +970,47 @@ static void post_TryChangeValueInLiquidContainer(UnrealScriptFunctionCallableCon
         g_pendingDrain = {};
     }
 
-    if (newLiquidValue <= 0 || changeable.LiquidLevel <= 0) {
-        return;
+    const bool filling = effectiveLiquidLevel(changeable) > effectiveLiquidLevel(before.ChangeableData);
+    if (filling) {
+        // A filled item joins an existing stack of the same liquid/soup if one has
+        // room; the rest stays in hand as it was, and the held actor is resynced.
+        SplitTarget same = findSplitTarget(player, inventory, sourceSlot, 1, inventory, slotIndex, true);
+        if (same.inventory) {
+            moveInto((*slotsOf(same.inventory))[same.index], true, sourceSlot, 1);
+            changeable.CurrentStack = stack - 1;
+            changeable.LiquidLevel = before.ChangeableData.LiquidLevel;
+            changeable.CurrentLiquid = before.ChangeableData.CurrentLiquid;
+            changeable.PlayerMadeString = before.ChangeableData.PlayerMadeString;
+            refreshInventory(inventory);
+            if (same.inventory != inventory) {
+                refreshInventory(same.inventory);
+            }
+            syncHeldItem(reinterpret_cast<UObject*>(player), inventory, slotIndex);
+            return;
+        }
     }
-
-    const FName rowName = sourceSlot.ItemDataTable.RowName;
-    SplitTarget target = findSplitTarget(player, inventory, rowName, liquidType, newLiquidValue, 1,
-                                         inventory, slotIndex);
+    SplitTarget target = findSplitTarget(player, inventory, before, stack - 1, inventory, slotIndex);
     if (!target.inventory) {
-        changeable.CurrentLiquid = ELiquidType::Empty;
-        changeable.LiquidLevel = 0;
+        if (!filling) {
+            return; // drinking/eating with a full inventory: keep vanilla (whole stack reduced), never duplicate
+        }
+        // Filling with a full inventory: undo the fill and refund the source.
+        const int32_t filled = effectiveLiquidLevel(changeable) - effectiveLiquidLevel(before.ChangeableData);
+        changeable.LiquidLevel = before.ChangeableData.LiquidLevel;
+        changeable.CurrentLiquid = before.ChangeableData.CurrentLiquid;
+        changeable.PlayerMadeString = before.ChangeableData.PlayerMadeString;
         refreshInventory(inventory);
+        syncHeldItem(reinterpret_cast<UObject*>(player), inventory, slotIndex);
         g_pendingRefund = {
             .player = player,
             .liquidType = liquidType,
-            .amount = newLiquidValue,
+            .amount = filled,
         };
         return;
     }
 
-    FAbioticInventoryItemSlot& targetSlot = (*slotsOf(target.inventory))[target.index];
-    moveOneTo(targetSlot, target.mergeInto, sourceSlot, newLiquidValue, static_cast<uint8_t>(liquidType));
-
-    changeable.CurrentStack = stack - 1;
-    changeable.CurrentLiquid = ELiquidType::Empty;
-    changeable.LiquidLevel = 0;
+    moveInto((*slotsOf(target.inventory))[target.index], target.mergeInto, before, stack - 1);
+    changeable.CurrentStack = 1;
 
     refreshInventory(inventory);
     if (target.inventory != inventory) {
@@ -889,6 +1042,33 @@ static bool readSelectedSlot(UObject* player, UAbiotic_InventoryComponent_C*& in
     inventory = *reinterpret_cast<UAbiotic_InventoryComponent_C**>(selected + s_inventoryOffset);
     index = *reinterpret_cast<int32_t*>(selected + s_indexOffset);
     return true;
+}
+
+static CachedField g_fItemInHand{STR("ItemInHand_BP")};
+static CachedField g_fItemChangeableData{STR("ChangeableData")};
+
+// Copies the slot's liquid state into the held item actor when that slot is the
+// one in hand, so the actor's next drink/fill starts from the slot's real value.
+static void syncHeldItem(UObject* player, UAbiotic_InventoryComponent_C* inventory, int32_t slotIndex) {
+    UAbiotic_InventoryComponent_C* heldInventory = nullptr;
+    int32_t heldIndex = -1;
+    if (!player || !readSelectedSlot(player, heldInventory, heldIndex) ||
+        heldInventory != inventory || heldIndex != slotIndex) {
+        return;
+    }
+    auto** actor = g_fItemInHand.in<UObject*>(player);
+    auto* slots = slotsOf(inventory);
+    if (!actor || !*actor || !slots || slotIndex >= slots->Num()) {
+        return;
+    }
+    auto* data = g_fItemChangeableData.in<FAbioticInventoryChangeableData>(*actor);
+    if (!data) {
+        return;
+    }
+    const FAbioticInventoryChangeableData& slot = (*slots)[slotIndex].ChangeableData;
+    data->LiquidLevel = slot.LiquidLevel;
+    data->CurrentLiquid = slot.CurrentLiquid;
+    data->PlayerMadeString = slot.PlayerMadeString;
 }
 
 static void post_IsHoldingLiquidContainer(UnrealScriptFunctionCallableContext& Ctx, void*) {
@@ -932,7 +1112,14 @@ static void post_TryFill_TO_PlayerContainer(UnrealScriptFunctionCallableContext&
     refundSourceContainer(Ctx.Context, refund.player, refund.liquidType, refund.amount);
 }
 
+static void pre_TryFill_FROM_PlayerContainer(UnrealScriptFunctionCallableContext&, void*) {
+    ++g_tryFillFromDepth;
+}
+
 static void post_TryFill_FROM_PlayerContainer(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    if (g_tryFillFromDepth > 0) {
+        --g_tryFillFromDepth;
+    }
     auto* onlyCheck = param<bool>(Ctx, STR("OnlyCheck"));
     auto** playerParam = param<AAbiotic_PlayerCharacter_C*>(Ctx, STR("PlayerCharacter"));
     if (!onlyCheck || !playerParam || *onlyCheck) {
@@ -966,21 +1153,22 @@ static void post_TryFill_FROM_PlayerContainer(UnrealScriptFunctionCallableContex
         return;
     }
 
-    const FName rowName = sourceSlot.ItemDataTable.RowName;
-    const auto curLiquidType = static_cast<uint8_t>(changeable.CurrentLiquid);
-    const int32_t curLiquid = changeable.LiquidLevel;
-    SplitTarget target = findSplitTarget(drain.player, drain.inventory, rowName, curLiquidType, curLiquid, 1,
+    // The drained single stays in hand (the held actor already has its state);
+    // the rest, still at the pre-drain level, moves to another stack.
+    SlotCopy rest;
+    if (!rest.capture(sourceSlot)) {
+        return;
+    }
+    rest.get()->ChangeableData.LiquidLevel = drain.preLiquid;
+    rest.get()->ChangeableData.CurrentLiquid = static_cast<ELiquidType::Type>(drain.liquidType);
+    SplitTarget target = findSplitTarget(drain.player, drain.inventory, *rest.get(), stack - 1,
                                          drain.inventory, drain.slotIndex);
     if (!target.inventory) {
         return;
     }
 
-    FAbioticInventoryItemSlot& targetSlot = (*slotsOf(target.inventory))[target.index];
-    moveOneTo(targetSlot, target.mergeInto, sourceSlot, curLiquid, curLiquidType);
-
-    changeable.CurrentStack = stack - 1;
-    changeable.LiquidLevel = drain.preLiquid;
-    changeable.CurrentLiquid = static_cast<ELiquidType::Type>(drain.liquidType);
+    moveInto((*slotsOf(target.inventory))[target.index], target.mergeInto, *rest.get(), stack - 1);
+    changeable.CurrentStack = 1;
 
     refreshInventory(drain.inventory);
     if (target.inventory != drain.inventory) {
@@ -1006,12 +1194,12 @@ static void post_AreItemsStackable(UnrealScriptFunctionCallableContext& Ctx, voi
     if (isEnergyLiquidType(l1) || isEnergyLiquidType(l2)) {
         return; // batteries/lasers keep vanilla stack-charge behavior
     }
-    if (l1 != l2 || c1.LiquidLevel != c2.LiquidLevel) {
+    if (l1 != l2 || effectiveLiquidLevel(c1) != effectiveLiquidLevel(c2)) {
         Ctx.SetReturnValue(false);
         return;
     }
-    if (getVariantName(c1) != getVariantName(c2)) {
-        Ctx.SetReturnValue(false);
+    if (getVariantName(c1) != getVariantName(c2) || !sameString(c1.PlayerMadeString, c2.PlayerMadeString)) {
+        Ctx.SetReturnValue(false); // texture variants and soup recipes stay apart
     }
 }
 
@@ -1249,7 +1437,7 @@ int registerHooks() {
         pre_IsInventoryFull, nullptr);
     count += registerHook(
         STR("/Game/Blueprints/Characters/Abiotic_PlayerCharacter.Abiotic_PlayerCharacter_C:Server_TryChangeValueInLiquidContainer"),
-        nullptr, post_TryChangeValueInLiquidContainer);
+        pre_TryChangeValueInLiquidContainer, post_TryChangeValueInLiquidContainer);
     count += registerHook(
         STR("/Game/Blueprints/Characters/Abiotic_PlayerCharacter.Abiotic_PlayerCharacter_C:IsHoldingLiquidContainer"),
         nullptr, post_IsHoldingLiquidContainer);
@@ -1258,7 +1446,7 @@ int registerHooks() {
         nullptr, post_TryFill_TO_PlayerContainer);
     count += registerHook(
         STR("/Game/Blueprints/DeployedObjects/Furniture/Deployed_LiquidContainer_ParentBP.Deployed_LiquidContainer_ParentBP_C:TryFill_FROM_PlayerContainer"),
-        nullptr, post_TryFill_FROM_PlayerContainer);
+        pre_TryFill_FROM_PlayerContainer, post_TryFill_FROM_PlayerContainer);
     count += registerHook(
         STR("/Game/Blueprints/Libraries/ItemFunctionLibrary.ItemFunctionLibrary_C:AreItemsStackable"),
         nullptr, post_AreItemsStackable);

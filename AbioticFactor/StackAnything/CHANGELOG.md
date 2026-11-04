@@ -1,5 +1,14 @@
 # StackAnything changelog
 
+## 3.1.1
+- Fixed taking soup into a stack of bowls filling every bowl in the stack.
+- Fixed drinking or eating from a stack of full containers or bowls emptying the rest of the stack.
+- Fixed cooking pots split off a stack (for example by filling one) getting stuck when placed on a stove.
+- Fixed emptying one pot from a stack of filled pots deleting the rest of the stack.
+- Fixed crossbow bolts and Grinder discs caught by the throwing auto-pickup perk starting a new stack instead of joining the existing one.
+- Bowls with different soups no longer stack together.
+- Filling, drinking or eating from a stack now keeps the changed item in hand and moves the rest to another stack; a filled item joins a matching existing stack when there is room.
+
 ## 3.1.0
 - Updated for Abiotic Factor 1.5.0 (Modding Update), built against UE4SS 3.0.1.
 - Stack overrides now also apply to items added by official (mod.io) mods, re-applied on each world load.
