@@ -2,7 +2,10 @@
 """Build, package and publish one mod of this monorepo to Nexus Mods (API v3).
 
   tools/nexus_release.py lookup [--write]      list your Abiotic Factor mods/files; --write fills tools/nexus.json
+  tools/nexus_release.py pull-changelogs       write <Mod>/CHANGELOG.md from the Nexus changelog (refuses to overwrite)
   tools/nexus_release.py publish <Mod> [opts]  build + test + zip + upload a new version of <Mod>'s file
+
+The changelog for a release is the `## <version>` section of AbioticFactor/<Mod>/CHANGELOG.md.
 
 Per-mod release tags: <Mod>-v<version>. The version comes from ModVersion in <Mod>/dllmain.cpp.
 API key: $NEXUSMODS_API_KEY, else libsecret (`secret-tool store --label='Nexus Mods API key' service nexusmods account api`).
@@ -10,6 +13,7 @@ Stdlib only.
 """
 import argparse
 import base64
+import html
 import hashlib
 import json
 import os
@@ -30,6 +34,7 @@ DIST = ROOT / "dist"
 PRESET = "game-shipping-xwin"
 BUILD_DIR = ROOT / "cmake-build-game__shipping__win64-xwin"
 API = os.environ.get("NEXUSMODS_API_BASE", "https://api.nexusmods.com/v3")
+API_V1 = "https://api.nexusmods.com/v1"
 GAME_DOMAIN = "abioticfactor"
 VERSION_RE = re.compile(r'ModVersion\s*=\s*STR\("([^"]+)"\)')
 
@@ -115,6 +120,7 @@ def cmd_lookup(args):
         if mod["name"] in local_mods:
             entry = cfg.setdefault(mod["name"], {})
             entry["mod_id"] = mod["id"]
+            entry["game_scoped_id"] = mod["game_scoped_id"]
             if len(active) == 1:
                 entry["file_id"] = active[0]["id"]
                 entry.setdefault("file_name", mod["name"])
@@ -152,19 +158,46 @@ def version_key(v):
     return parts
 
 
-def previous_tag(mod):
+def changelog_path(mod):
+    return MODS_DIR / mod / "CHANGELOG.md"
+
+
+def changelog_entries(mod, version):
+    """Bullets of the `## <version>` section; one bullet = one Nexus changelog entry."""
+    path = changelog_path(mod)
+    if not path.exists():
+        return []
+    entries, current = [], None
+    for line in path.read_text().splitlines():
+        if line.startswith("## "):
+            current = version_key(line[3:].strip()) == version_key(version)
+        elif current and line.startswith("- "):
+            entries.append(line[2:].strip())
+        elif current and line.startswith("  ") and entries:
+            entries[-1] += " " + line.strip()
+    return [e for e in entries if e]
+
+
+def git_hint(mod):
     tags = git("tag", "--list", f"{mod}-v*", "--merged", "HEAD", "--sort=-v:refname").splitlines()
-    return tags[0] if tags else None
+    rng = [f"{tags[0]}..HEAD"] if tags else ["-10"]
+    return git("log", "--no-merges", "--format=  %h %s", *rng, "--", f"AbioticFactor/{mod}")
 
 
-def changelog_from_git(mod, since):
-    log = git("log", "--no-merges", "--format=%s", f"{since}..HEAD", "--", f"AbioticFactor/{mod}")
-    lines = []
-    for s in log.splitlines():
-        s = re.sub(rf"^{re.escape(mod)}:\s*", "", s).strip()
-        if s:
-            lines.append(f"- {s}")
-    return "\n".join(lines)
+def cmd_pull_changelogs(args):
+    key = api_key()
+    for mod, entry in load_config().items():
+        path = changelog_path(mod)
+        if path.exists() and not args.force:
+            print(f"skip {path.relative_to(ROOT)}: exists (--force to overwrite)")
+            continue
+        gid = entry.get("game_scoped_id") or die(f"{CONFIG.name}: {mod}.game_scoped_id missing; run `lookup --write`")
+        data = request("GET", f"{API_V1}/games/{GAME_DOMAIN}/mods/{gid}/changelogs.json", headers={"apikey": key})
+        out = [f"# {mod} changelog", ""]
+        for ver in sorted(data, key=version_key, reverse=True):
+            out += [f"## {ver}", *(f"- {html.unescape(e).strip()}" for e in data[ver]), ""]
+        path.write_text("\n".join(out))
+        print(f"wrote {path.relative_to(ROOT)} ({len(data)} versions)")
 
 
 def build_and_test(mod):
@@ -229,14 +262,11 @@ def cmd_publish(args):
     if dirty and not args.allow_dirty:
         die(f"uncommitted changes in AbioticFactor/{mod} (the release must match the tagged commit):\n{dirty}")
 
-    if args.changelog_file:
-        changelog = Path(args.changelog_file).read_text().strip()
-    else:
-        prev = previous_tag(mod)
-        changelog = changelog_from_git(mod, prev) if prev else ""
-        if not changelog and not args.dry_run:
-            die(f"no commits touching AbioticFactor/{mod} since {prev}" if prev
-                else f"no previous {mod}-v* tag to diff against; pass --changelog-file")
+    entries = changelog_entries(mod, version)
+    if not entries and not args.dry_run:
+        die(f"no `## {version}` section with `- ` entries in AbioticFactor/{mod}/CHANGELOG.md; "
+            f"commits since the last release:\n{git_hint(mod)}")
+    changelog = "\n".join(f"- {e}" for e in entries)
 
     key = None if args.dry_run else api_key()
     if key:
@@ -268,8 +298,9 @@ def cmd_publish(args):
         body["description"] = entry["description"]
     created = api("POST", f"/mod-files/{entry['file_id']}/versions", key, body)["data"]
     print(f"created file version {created['version']['id']}")
-    api("POST", f"/mods/{entry['mod_id']}/changelogs", key, {"version": version, "changelog": changelog})
-    print("changelog added")
+    for e in entries:  # one POST per entry, matching how Nexus stores them
+        api("POST", f"/mods/{entry['mod_id']}/changelogs", key, {"version": version, "changelog": e})
+    print(f"changelog added ({len(entries)} entries)")
 
     run(["git", "tag", "-a", tag, "-m", f"{mod} {version}\n\n{changelog}"])
     if args.push_tag:
@@ -284,9 +315,11 @@ def main():
     lk = sub.add_parser("lookup", help="list your Nexus mods/files for the game")
     lk.add_argument("--write", action="store_true", help=f"merge found ids into {CONFIG.name}")
     lk.set_defaults(func=cmd_lookup)
+    pc = sub.add_parser("pull-changelogs", help="write <Mod>/CHANGELOG.md from Nexus")
+    pc.add_argument("--force", action="store_true", help="overwrite existing CHANGELOG.md files")
+    pc.set_defaults(func=cmd_pull_changelogs)
     pb = sub.add_parser("publish", help="build, test, zip and upload one mod")
     pb.add_argument("mod")
-    pb.add_argument("--changelog-file", help="changelog text (default: commit subjects since the previous tag)")
     pb.add_argument("--dry-run", action="store_true", help="build, test and zip only")
     pb.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     pb.add_argument("--push-tag", action="store_true", help="push the release tag to origin")
