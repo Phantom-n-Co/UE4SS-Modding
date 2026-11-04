@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Live StackAnything liquid-stack checks through AFTestBridge (in an AFTest world).
+"""Live StackAnything liquid-stack checks through AFTestBridge, in the AFTest world with only
+AFTestBridge + StackAnything deployed (tools/aftest_mods.py; starts the game if needed).
 
 Each scenario writes the hotbar (CharacterHotbarInventory.CurrentInventory) directly,
 then calls the real Server_TryChangeValueInLiquidContainer / AreItemsStackable so
@@ -9,14 +10,15 @@ at the end. Prints ALL PASS / exits 1 on any failure.
 Not covered: the held item actor (ItemInHand_BP) path. Drinking computes the new
 level from the actor's copy, which only exists when an item is really equipped.
 
-  tools/aftest_liquidstacks.py
+  tools/tests/aftest_liquidstacks.py
 """
 import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tools/: harness modules
 from afbridge import BridgeError, request  # noqa: E402
+from aftest_mods import run_isolated  # noqa: E402
 
 HOTBAR = "player->CharacterHotbarInventory"
 FN_LIB = "/Game/Blueprints/Libraries/ItemFunctionLibrary.Default__ItemFunctionLibrary_C"
@@ -222,4 +224,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_isolated(["StackAnything"], main))

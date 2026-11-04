@@ -11,7 +11,10 @@ xwin/
 .xwin-cache/
 CMakeUserPresets.json
 AbioticFactor/BPDecomp/
-tools/__pycache__
+__pycache__/
+
+# Local bug repros (repro mods + their live tests)
+tools/repros/
 
 # Release archives
 dist/

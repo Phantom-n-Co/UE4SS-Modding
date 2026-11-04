@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Live StackAnything check through AFTestBridge (game running, any map incl. main menu).
+"""Live StackAnything check through AFTestBridge, in the AFTest world with only AFTestBridge +
+StackAnything deployed (tools/aftest_mods.py; starts the game if needed).
 
 For every row of every loaded item table (except ItemTable_Pets and Hacker/Companion
 equipment, which StackAnything skips), the row matched by the deployed config.lua
@@ -7,17 +8,18 @@ equipment, which StackAnything skips), the row matched by the deployed config.lu
 have StackSize >= the configured max. StackAnything only raises, so a larger vanilla
 StackSize is left alone and also passes. Prints ALL PASS / exits 1 on any failure.
 
-  tools/aftest_stackanything.py [--config PATH]
+  tools/tests/aftest_stackanything.py [--config PATH]
 """
 import argparse
 import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tools/: harness modules
 from afbridge import BridgeError, request  # noqa: E402
+from aftest_mods import run_isolated  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "AbioticFactor/AbioticFactor/ue4ss/Mods/StackAnything/config.lua"
 SKIPPED_EQUIP_SLOTS = {12, 15}  # EInventorySlotType::EquipmentSlot_Hacker / _Companion (GameTypes.hpp)
 LINE_RE = re.compile(r'^\s*\["(.*)"\]\s*=\s*(\d+)\s*,?\s*$')  # config.cpp parseConfigText
@@ -100,4 +102,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_isolated(["StackAnything"], main))
