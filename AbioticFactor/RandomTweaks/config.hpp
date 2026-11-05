@@ -17,6 +17,7 @@ struct TweakConfig {
     bool disableWatchLight = false;
     bool wishingShelfTopUp = true;
     bool transmogHideSuitAndBackpack = true;
+    bool nameableTeleporters = true;
 };
 
 // Built-in defaults, matching the Lua mod's config.lua. Only used when

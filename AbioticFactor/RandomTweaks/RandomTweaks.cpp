@@ -11,9 +11,16 @@
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Core/Containers/Array.hpp>
+#include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
+#include <Unreal/Property/FTextProperty.hpp>
+#include <Unreal/FText.hpp>
+#include <Unreal/Core/Containers/Map.hpp>
+#include "teleporter_names.hpp"
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <random>
 #include <vector>
 
@@ -843,6 +850,837 @@ static void pre_TransmogSlotEmptyClicked(UnrealScriptFunctionCallableContext& Ct
     }
 }
 
+// ---- Nameable teleporter pads ----
+// Vanilla pads pick one of 26 tags; the tag index is stored as the pad's
+// TeleporterFrequency dynamic property and all linking is int-based
+// ("teleporterpad<id>", GameState location "<id>"). A custom name is stored in
+// ChangeableData.PlayerMadeString (saved and replicated with the pad; the field
+// pre-1.0 pads used for typed names) and mapped to a stable id >= 1000, so
+// vanilla links same-named pads by itself. The tag popup's text line is made
+// editable; a typed name is sent as "<id>:<name>" through the vanilla string RPC.
+// Without the mod, vanilla's AttemptSaveUpgrade converts the names to tags on load.
+namespace tn = teleporter_names;
+
+static const wchar_t* kPadClassPath =
+    L"/Game/Blueprints/DeployedObjects/Furniture/Deployed_TeleporterPad.Deployed_TeleporterPad_C";
+static const wchar_t* kPadDeliverStringPath =
+    L"/Game/Blueprints/DeployedObjects/Furniture/Deployed_TeleporterPad.Deployed_TeleporterPad_C:DeliverString";
+static const wchar_t* kPadOnLoadedFromSavePath =
+    L"/Game/Blueprints/DeployedObjects/Furniture/Deployed_TeleporterPad.Deployed_TeleporterPad_C:OnLoadedFromSave";
+static const wchar_t* kPadGetItemNameTextPath =
+    L"/Game/Blueprints/DeployedObjects/Furniture/Deployed_TeleporterPad.Deployed_TeleporterPad_C:GetItemNameText";
+static const wchar_t* kPadInteractPath =
+    L"/Game/Blueprints/DeployedObjects/Furniture/Deployed_TeleporterPad.Deployed_TeleporterPad_C:InteractWith_B_LocalFX";
+static const wchar_t* kPadYesClickedPath =
+    L"/Game/Blueprints/DeployedObjects/Furniture/Deployed_TeleporterPad.Deployed_TeleporterPad_C:YesClicked_Event";
+static const wchar_t* kTeleporterPopupClassPath =
+    L"/Game/Blueprints/Widgets/MenuSystem/W_MenuPopup_TeleporterInput.W_MenuPopup_TeleporterInput_C";
+static const wchar_t* kTeleporterPopupConstructPath =
+    L"/Game/Blueprints/Widgets/MenuSystem/W_MenuPopup_TeleporterInput.W_MenuPopup_TeleporterInput_C:Construct";
+static const wchar_t* kTeleporterPopupUpdateTextPath =
+    L"/Game/Blueprints/Widgets/MenuSystem/W_MenuPopup_TeleporterInput.W_MenuPopup_TeleporterInput_C:UpdateText";
+static const wchar_t* kTagOptionClassPath =
+    L"/Game/Blueprints/Widgets/MenuSystem/W_TeleporterTag_Option.W_TeleporterTag_Option_C";
+static const wchar_t* kTagOptionConstructPath =
+    L"/Game/Blueprints/Widgets/MenuSystem/W_TeleporterTag_Option.W_TeleporterTag_Option_C:Construct";
+static constexpr uint8_t kTeleporterFrequencyKey = 5; // EDynamicProperty::TeleporterFrequency
+
+// ProcessEvent params, initialized through reflection and destroyed on scope
+// exit, so FString/FText params and return values don't leak.
+struct CallParams {
+    UObject* obj = nullptr;
+    UFunction* fn = nullptr;
+    std::vector<uint8_t> data;
+    std::vector<FProperty*> props;
+
+    CallParams(UObject* o, const wchar_t* name) : obj(o) {
+        fn = obj ? obj->GetFunctionByNameInChain(name) : nullptr;
+        if (!fn) {
+            return;
+        }
+        data.resize(static_cast<size_t>(fn->GetStructureSize()));
+        for (FProperty* prop : TFieldRange<FProperty>(fn, EFieldIterationFlags::IncludeDeprecated)) {
+            if (prop->HasAnyPropertyFlags(CPF_Parm)) {
+                prop->InitializeValue_InContainer(data.data());
+                props.push_back(prop);
+            }
+        }
+    }
+    ~CallParams() {
+        for (FProperty* prop : props) {
+            prop->DestroyValue_InContainer(data.data());
+        }
+    }
+    CallParams(const CallParams&) = delete;
+    CallParams& operator=(const CallParams&) = delete;
+
+    explicit operator bool() const { return fn != nullptr; }
+    void* at(FProperty* prop) { return prop->ContainerPtrToValuePtr<void>(data.data()); }
+    // First input param of field type T (return value excluded).
+    template <typename T>
+    FProperty* input() {
+        for (FProperty* prop : props) {
+            if (!prop->HasAnyPropertyFlags(CPF_ReturnParm) && CastField<T>(prop)) {
+                return prop;
+            }
+        }
+        return nullptr;
+    }
+    FProperty* ret() {
+        for (FProperty* prop : props) {
+            if (prop->HasAnyPropertyFlags(CPF_ReturnParm)) {
+                return prop;
+            }
+        }
+        return nullptr;
+    }
+    void setString(const std::wstring& value) {
+        if (FProperty* prop = input<FStrProperty>()) {
+            *static_cast<FString*>(at(prop)) = FString(value.c_str());
+        }
+    }
+    void setText(const std::wstring& value) {
+        if (FProperty* prop = input<FTextProperty>()) {
+            FText text(value.c_str());
+            prop->CopyCompleteValue(at(prop), &text);
+        }
+    }
+    void setBool(bool value) {
+        if (auto* prop = CastField<FBoolProperty>(input<FBoolProperty>())) {
+            prop->SetPropertyValue(at(prop), value);
+        }
+    }
+    void setObject(UObject* value) {
+        if (auto* prop = CastField<FObjectPropertyBase>(input<FObjectPropertyBase>())) {
+            prop->SetObjectPropertyValue(at(prop), value);
+        }
+    }
+    void call() {
+        if (fn) {
+            obj->ProcessEvent(fn, data.data());
+        }
+    }
+    bool retBool() {
+        auto* prop = CastField<FBoolProperty>(ret());
+        return prop && prop->GetPropertyValue(at(prop));
+    }
+    UObject* retObject() {
+        auto* prop = CastField<FObjectPropertyBase>(ret());
+        return prop ? prop->GetObjectPropertyValue(at(prop)) : nullptr;
+    }
+    std::wstring retText() {
+        FProperty* prop = ret();
+        return CastField<FTextProperty>(prop) ? static_cast<FText*>(at(prop))->ToString() : std::wstring{};
+    }
+};
+
+// A ChangeableData struct value: of a live deployable or of a world-save entry.
+struct ChangeableRef {
+    UStruct* type = nullptr;
+    void* data = nullptr;
+    explicit operator bool() const { return type && data; }
+};
+
+// <owner>.<field> where <field> is a struct property; empty if missing.
+static ChangeableRef structMember(UStruct* ownerType, void* owner, const wchar_t* field) {
+    if (!ownerType || !owner) {
+        return {};
+    }
+    for (FProperty* prop : TFieldRange<FProperty>(ownerType, EFieldIterationFlags::IncludeSuper)) {
+        if (prop->GetName() == field) {
+            auto* sp = CastField<FStructProperty>(prop);
+            return sp ? ChangeableRef{sp->GetStruct().Get(), prop->ContainerPtrToValuePtr<void>(owner)} : ChangeableRef{};
+        }
+    }
+    return {};
+}
+
+static ChangeableRef changeableOf(UObject* actor) {
+    return actor ? structMember(actor->GetClassPrivate(), actor, STR("ChangeableData")) : ChangeableRef{};
+}
+
+static void* changeableField(ChangeableRef cd, const wchar_t* field, FProperty*& outProp) {
+    outProp = nullptr;
+    if (!cd) {
+        return nullptr;
+    }
+    for (FProperty* prop : TFieldRange<FProperty>(cd.type, EFieldIterationFlags::IncludeSuper)) {
+        if (prop->GetName() == field) {
+            outProp = prop;
+            return prop->ContainerPtrToValuePtr<void>(cd.data);
+        }
+    }
+    return nullptr;
+}
+
+static FString* stringField(ChangeableRef cd, const wchar_t* field) {
+    FProperty* prop = nullptr;
+    void* at = changeableField(cd, field, prop);
+    return CastField<FStrProperty>(prop) ? static_cast<FString*>(at) : nullptr;
+}
+
+static std::wstring readString(ChangeableRef cd, const wchar_t* field) {
+    FString* value = stringField(cd, field);
+    return value ? std::wstring(**value) : std::wstring{};
+}
+
+static FString* padNameField(UObject* pad) {
+    return stringField(changeableOf(pad), STR("PlayerMadeString"));
+}
+
+static std::wstring getPadName(UObject* pad) {
+    return readString(changeableOf(pad), STR("PlayerMadeString"));
+}
+
+static void setPadName(UObject* pad, const std::wstring& name) {
+    if (FString* field = padNameField(pad)) {
+        *field = FString(name.c_str());
+    }
+}
+
+// The TeleporterFrequency dynamic property (tag index or custom-name id).
+static bool frequencyOf(ChangeableRef cd, int32_t& value) {
+    FProperty* prop = nullptr;
+    void* at = changeableField(cd, STR("DynamicProperties"), prop);
+    auto* arr = CastField<FArrayProperty>(prop);
+    auto* inner = arr ? CastField<FStructProperty>(arr->GetInner()) : nullptr;
+    if (!at || !inner) {
+        return false;
+    }
+    UScriptStruct* entry = inner->GetStruct().Get();
+    const int32_t keyOffset = structFieldOffset(entry, STR("Key"));
+    const int32_t valueOffset = structFieldOffset(entry, STR("Value"));
+    if (keyOffset < 0 || valueOffset < 0) {
+        return false;
+    }
+    const auto* entries = static_cast<const TArray<uint8_t>*>(at);
+    const int32_t stride = inner->GetElementSize();
+    for (int32_t i = 0; i < entries->Num(); ++i) {
+        const uint8_t* e = entries->GetData() + static_cast<size_t>(i) * stride;
+        if (e[keyOffset] == kTeleporterFrequencyKey) {
+            value = *reinterpret_cast<const int32_t*>(e + valueOffset);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool getPadFrequency(UObject* pad, int32_t& value) {
+    return frequencyOf(changeableOf(pad), value);
+}
+
+// The custom name if set and the frequency is that name's id.
+static std::wstring activeNameOf(ChangeableRef cd) {
+    std::wstring name = readString(cd, STR("PlayerMadeString"));
+    int32_t frequency = 0;
+    if (name.empty() || !frequencyOf(cd, frequency) || frequency != tn::nameToId(name)) {
+        return {};
+    }
+    return name;
+}
+
+static std::wstring getActivePadName(UObject* pad) {
+    return activeNameOf(changeableOf(pad));
+}
+
+// Replicate a ChangeableData edit the way the pad's own BP does.
+static void markChangeableDirty(UObject* pad) {
+    if (CallParams flush{pad, STR("FlushNetDormancy")}) {
+        flush.call();
+    }
+    auto* helpers = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Engine.Default__NetPushModelHelpers"));
+    CallParams mark{helpers, STR("MarkPropertyDirty")};
+    if (!mark) {
+        return;
+    }
+    mark.setObject(pad);
+    if (FProperty* nameProp = mark.input<FNameProperty>()) {
+        *static_cast<FName*>(mark.at(nameProp)) = FName(STR("ChangeableData"), FNAME_Add);
+    }
+    mark.call();
+}
+
+static void setPadLocationId(UObject* pad, int32_t id) {
+    CallParams c{pad, STR("Set New Location ID")};
+    c.setString(std::to_wstring(id));
+    c.setBool(true);
+    c.call();
+}
+
+static bool calledFrom(UnrealScriptFunctionCallableContext& Ctx, const wchar_t* fnName) {
+    for (FFrame* frame = Ctx.TheStack.PreviousFrame(); frame; frame = frame->PreviousFrame()) {
+        UFunction* node = frame->Node();
+        if (node && node->GetName() == fnName) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::wstring getWidgetText(UObject* widget) {
+    CallParams c{widget, STR("GetText")};
+    c.call();
+    return c.retText();
+}
+
+static void setWidgetText(UObject* widget, const std::wstring& text) {
+    CallParams c{widget, STR("SetText")};
+    c.setText(text);
+    c.call();
+}
+
+static int32_t* popupCurrentIndex(UObject* popup) {
+    auto* prop = popup ? CastField<FIntProperty>(popup->GetPropertyByNameInChain(STR("CurrentIndex"))) : nullptr;
+    return prop ? prop->ContainerPtrToValuePtr<int32_t>(popup) : nullptr;
+}
+
+// ---- Name list (replaces the premade tags in the popup) ----
+// Every named pad: live pads (all a client knows), plus on the host the world
+// save entries of every streaming level of the current map (pads in unloaded
+// levels). Live state wins over the save, matched by AssetID.
+static UObject* callStaticObject(const wchar_t* cdoPath, const wchar_t* fn, UObject* worldContext) {
+    auto* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, cdoPath);
+    CallParams c{cdo, fn};
+    c.setObject(worldContext);
+    c.call();
+    return c.retObject();
+}
+
+static bool isServer(UObject* worldContext) {
+    auto* lib = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+    CallParams c{lib, STR("IsServer")};
+    c.setObject(worldContext);
+    c.call();
+    return c.retBool();
+}
+
+static std::wstring exportProperty(FProperty* prop, const void* value) {
+    FString text;
+    prop->ExportTextItem(text, value, nullptr, nullptr, 0);
+    return std::wstring(*text);
+}
+
+// Short level names of the current map: "Facility" plus its streaming levels
+// ("Facility_Office1", ...), the keys the game uses for its world saves.
+static std::vector<std::wstring> mapLevelNames(UObject* gameState) {
+    UObject* level = gameState ? gameState->GetOuterPrivate() : nullptr;
+    UObject* world = level ? level->GetOuterPrivate() : nullptr;
+    std::vector<std::wstring> names;
+    if (!world) {
+        return names;
+    }
+    names.push_back(world->GetName());
+    auto* arr = CastField<FArrayProperty>(world->GetPropertyByNameInChain(STR("StreamingLevels")));
+    if (!arr) {
+        return names;
+    }
+    const auto* levels = arr->ContainerPtrToValuePtr<TArray<UObject*>>(world);
+    for (UObject* streaming : *levels) {
+        FProperty* asset = streaming ? streaming->GetPropertyByNameInChain(STR("WorldAsset")) : nullptr;
+        if (!asset) {
+            continue;
+        }
+        const std::wstring path = exportProperty(asset, asset->ContainerPtrToValuePtr<void>(streaming));
+        const auto dot = path.find_last_of(L'.');
+        if (dot != std::wstring::npos && dot + 1 < path.size()) {
+            names.push_back(path.substr(dot + 1));
+        }
+    }
+    return names;
+}
+
+// The cached world save of `level`; loads it from disk if it exists but isn't
+// cached yet (the game does the same when the level streams in). Never creates one.
+static UObject* worldSaveFor(UObject* gameInstance, const std::wstring& level) {
+    auto* mapProp = CastField<FMapProperty>(gameInstance->GetPropertyByNameInChain(STR("WorldSaveMap")));
+    if (mapProp && CastField<FStrProperty>(mapProp->GetKeyProp()) && CastField<FObjectPropertyBase>(mapProp->GetValueProp())) {
+        auto* map = mapProp->ContainerPtrToValuePtr<FScriptMap>(gameInstance);
+        const FScriptMapLayout& layout = mapProp->GetMapLayout();
+        for (int32_t i = 0; i < map->GetMaxIndex(); ++i) {
+            if (!map->IsValidIndex(i)) {
+                continue;
+            }
+            auto* pair = static_cast<uint8_t*>(map->GetData(i, layout));
+            if (tn::equalsIgnoreCase(std::wstring(**reinterpret_cast<FString*>(pair)), level)) {
+                return *reinterpret_cast<UObject**>(pair + layout.ValueOffset);
+            }
+        }
+    }
+    CallParams exists{gameInstance, STR("DoesWorldSaveExist")};
+    exists.setString(level);
+    exists.call();
+    if (!exists.retBool()) {
+        return nullptr;
+    }
+    CallParams get{gameInstance, STR("GetWorldSave")};
+    get.setString(level);
+    get.call();
+    return get.retObject();
+}
+
+// AssetID -> active custom name ("" = pad without one), from a world save.
+static void collectSavedPadNames(UObject* save, std::map<std::wstring, std::wstring>& byAsset) {
+    auto* mapProp = save ? CastField<FMapProperty>(save->GetPropertyByNameInChain(STR("DeployedObjectMap"))) : nullptr;
+    auto* valueProp = mapProp ? CastField<FStructProperty>(mapProp->GetValueProp()) : nullptr;
+    if (!valueProp) {
+        return;
+    }
+    UScriptStruct* entryType = valueProp->GetStruct().Get();
+    FProperty* classProp = nullptr;
+    FProperty* destroyedProp = nullptr;
+    for (FProperty* prop : TFieldRange<FProperty>(entryType, EFieldIterationFlags::IncludeSuper)) {
+        if (prop->GetName() == L"DeployableClass") {
+            classProp = prop;
+        } else if (prop->GetName() == L"bDestroyed") {
+            destroyedProp = prop;
+        }
+    }
+    auto* map = mapProp->ContainerPtrToValuePtr<FScriptMap>(save);
+    const FScriptMapLayout& layout = mapProp->GetMapLayout();
+    for (int32_t i = 0; i < map->GetMaxIndex(); ++i) {
+        if (!map->IsValidIndex(i)) {
+            continue;
+        }
+        auto* entry = static_cast<uint8_t*>(map->GetData(i, layout)) + layout.ValueOffset;
+        const ChangeableRef cd = structMember(entryType, entry, STR("ChangeableData"));
+        const std::wstring name = activeNameOf(cd); // cheap filter before the class export
+        if (name.empty()) {
+            continue;
+        }
+        if (auto* destroyed = CastField<FBoolProperty>(destroyedProp);
+            destroyed && destroyed->GetPropertyValue(destroyed->ContainerPtrToValuePtr<void>(entry))) {
+            continue;
+        }
+        if (!classProp ||
+            exportProperty(classProp, classProp->ContainerPtrToValuePtr<void>(entry)).find(L"Deployed_TeleporterPad") ==
+                std::wstring::npos) {
+            continue;
+        }
+        const std::wstring asset = readString(cd, STR("AssetID"));
+        if (asset.empty() || asset == L"-1") {
+            continue; // the game never respawns these either
+        }
+        byAsset[asset] = name;
+    }
+}
+
+struct PadNameEntry {
+    std::wstring name;
+    int32_t count = 0;
+};
+
+static std::vector<PadNameEntry> collectPadNames(UObject* worldContext) {
+    std::map<std::wstring, std::wstring> byAsset;
+    if (worldContext && isServer(worldContext)) {
+        UObject* gameInstance = callStaticObject(STR("/Script/Engine.Default__GameplayStatics"), STR("GetGameInstance"), worldContext);
+        UObject* gameState = callStaticObject(STR("/Script/Engine.Default__GameplayStatics"), STR("GetGameState"), worldContext);
+        if (gameInstance) {
+            for (const std::wstring& level : mapLevelNames(gameState)) {
+                collectSavedPadNames(worldSaveFor(gameInstance, level), byAsset);
+            }
+        }
+    }
+    UClass* padClass = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, kPadClassPath);
+    std::vector<UObject*> live;
+    if (padClass) {
+        UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> RC::LoopAction {
+            if (obj->IsA(padClass) && !obj->HasAnyFlags(static_cast<EObjectFlags>(RF_ClassDefaultObject | RF_ArchetypeObject))) {
+                live.push_back(obj);
+            }
+            return RC::LoopAction::Continue;
+        });
+    }
+    // Destroyed pads stay in the object array until GC. The engine's own IsValid
+    // knows its garbage flag (UE4SS's EInternalObjectFlags has the UE4 bit layout).
+    auto* kismet = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+    for (UObject* obj : live) {
+        CallParams valid{kismet, STR("IsValid")};
+        valid.setObject(obj);
+        valid.call();
+        if (!valid.retBool()) {
+            continue;
+        }
+        std::wstring asset = readString(changeableOf(obj), STR("AssetID"));
+        if (asset.empty() || asset == L"-1") {
+            asset = obj->GetFullName(); // never saved: key by object
+        }
+        byAsset[asset] = getActivePadName(obj);
+    }
+    // Pads sharing a name (case-insensitive) are one entry, shown in its most used
+    // spelling; ties go to the first in code-unit order, so the label is stable.
+    std::map<int32_t, std::map<std::wstring, int32_t>> spellingsById;
+    for (const auto& [asset, name] : byAsset) {
+        if (!name.empty()) {
+            ++spellingsById[tn::nameToId(name)][name];
+        }
+    }
+    std::vector<PadNameEntry> out;
+    for (const auto& [id, spellings] : spellingsById) {
+        PadNameEntry e;
+        int32_t best = 0;
+        for (const auto& [spelling, n] : spellings) {
+            e.count += n;
+            if (n > best) {
+                best = n;
+                e.name = spelling;
+            }
+        }
+        out.push_back(e);
+    }
+    std::sort(out.begin(), out.end(), [](const PadNameEntry& a, const PadNameEntry& b) {
+        std::wstring la = a.name, lb = b.name;
+        for (auto& c : la) c = tn::asciiLower(c);
+        for (auto& c : lb) c = tn::asciiLower(c);
+        return la < lb;
+    });
+    return out;
+}
+
+// Client-side popup state. One teleporter popup is open at a time.
+static FWeakObjectPtr g_openingPad;        // pad whose interaction opened the popup
+static FWeakObjectPtr g_teleporterPopup;   // the open W_MenuPopup_TeleporterInput
+static std::wstring g_lastTagText;         // what vanilla UpdateText wrote while opening
+static std::vector<std::wstring> g_listNames; // name list shown in g_teleporterPopup (by option Index)
+static bool g_listPicked = false;          // text line came from the name list
+struct OptionLabel {
+    FWeakObjectPtr option;
+    std::wstring label;
+};
+static std::vector<OptionLabel> g_optionLabels;
+struct UpdateTextFrame {
+    bool listActive;
+    bool keepTyped;
+    std::wstring text;
+};
+static std::vector<UpdateTextFrame> g_updateTextStash;
+static FWeakObjectPtr g_pendingNamePad;
+static std::wstring g_pendingName;
+
+static void pre_PadInteract(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    if (g_config.nameableTeleporters) {
+        g_openingPad = FWeakObjectPtr(Ctx.Context);
+    }
+}
+
+// A custom-id CurrentIndex would index past the tag list; show tag 0 selected instead.
+static void pre_TeleporterPopupConstruct(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    if (!g_config.nameableTeleporters) {
+        return;
+    }
+    g_teleporterPopup = FWeakObjectPtr();
+    g_listNames.clear();
+    if (int32_t* index = popupCurrentIndex(Ctx.Context); index && tn::isCustomId(*index)) {
+        *index = 0;
+    }
+}
+
+static void setOptionLabel(UObject* option, const std::wstring& label) {
+    if (UObject* text = getObjectProperty(option, STR("TextName"))) {
+        setWidgetText(text, label);
+    }
+}
+
+// Replaces the tag options vanilla just built with one option per pad name.
+static void buildNameList(UObject* popup, const std::wstring& currentName) {
+    UObject* scroll = getObjectProperty(popup, STR("Scrollbox_Options"));
+    auto* optionClass = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, kTagOptionClassPath);
+    auto* widgetLib = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/UMG.Default__WidgetBlueprintLibrary"));
+    if (!scroll || !optionClass || !widgetLib) {
+        return;
+    }
+    if (CallParams clear{scroll, STR("ClearChildren")}) {
+        clear.call();
+    }
+    auto* lastSelected = CastField<FObjectPropertyBase>(popup->GetPropertyByNameInChain(STR("LastSelectedWidget")));
+    if (lastSelected) {
+        lastSelected->SetObjectPropertyValue(lastSelected->ContainerPtrToValuePtr<void>(popup), nullptr);
+    }
+    std::erase_if(g_optionLabels, [](const OptionLabel& o) { return !o.option.Get(); });
+    const std::vector<PadNameEntry> names = collectPadNames(popup);
+    for (size_t i = 0; i < names.size(); ++i) {
+        CallParams create{widgetLib, STR("Create")};
+        for (FProperty* prop : create.props) {
+            if (prop->GetName() == L"WorldContextObject") {
+                CastField<FObjectPropertyBase>(prop)->SetObjectPropertyValue(create.at(prop), popup);
+            } else if (prop->GetName() == L"WidgetType") {
+                CastField<FObjectPropertyBase>(prop)->SetObjectPropertyValue(create.at(prop), optionClass);
+            }
+        }
+        create.call();
+        UObject* option = create.retObject();
+        if (!option) {
+            continue;
+        }
+        const std::wstring label = names[i].name + L" (" + std::to_wstring(names[i].count) + L")";
+        if (auto* nameProp = CastField<FStrProperty>(option->GetPropertyByNameInChain(STR("Name")))) {
+            *nameProp->ContainerPtrToValuePtr<FString>(option) = FString(names[i].name.c_str());
+        }
+        if (auto* indexProp = CastField<FIntProperty>(option->GetPropertyByNameInChain(STR("Index")))) {
+            indexProp->SetPropertyValueInContainer(option, static_cast<int32_t>(i));
+        }
+        g_optionLabels.push_back({FWeakObjectPtr(option), label});
+        CallParams add{scroll, STR("AddChild")};
+        add.setObject(option);
+        add.call();
+        CallParams padding{option, STR("SetPadding")};
+        if (auto* margin = CastField<FStructProperty>(padding.input<FStructProperty>());
+            margin && margin->GetElementSize() == 4 * sizeof(float)) {
+            const float values[4] = {0.f, 5.f, 0.f, 0.f}; // vanilla: Top = 5
+            std::memcpy(padding.at(margin), values, sizeof(values));
+            padding.call();
+        }
+        setOptionLabel(option, label); // Construct may already have run with "{num} - {name}"
+        g_listNames.push_back(names[i].name);
+        if (!currentName.empty() && tn::equalsIgnoreCase(names[i].name, currentName)) {
+            CallParams disable{option, STR("SetIsEnabled")}; // vanilla marks the selected option disabled
+            disable.setBool(false);
+            disable.call();
+            if (lastSelected) {
+                lastSelected->SetObjectPropertyValue(lastSelected->ContainerPtrToValuePtr<void>(popup), option);
+            }
+            if (int32_t* index = popupCurrentIndex(popup)) {
+                *index = static_cast<int32_t>(i);
+            }
+        }
+    }
+    log(L"teleporter: name list with " + std::to_wstring(names.size()) + L" name(s)");
+}
+
+static void post_TeleporterPopupConstruct(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    if (!g_config.nameableTeleporters) {
+        return;
+    }
+    UObject* popup = Ctx.Context;
+    UObject* textBox = getObjectProperty(popup, STR("TextBox_Line"));
+    if (!textBox) {
+        return;
+    }
+    // Vanilla shows the line disabled and read-only (a display of the selected tag).
+    CallParams enable{textBox, STR("SetIsEnabled")};
+    enable.setBool(true);
+    enable.call();
+    CallParams readOnly{textBox, STR("SetIsReadOnly")};
+    readOnly.setBool(false);
+    readOnly.call();
+    const std::wstring name = getActivePadName(g_openingPad.Get());
+    if (!name.empty()) {
+        setWidgetText(textBox, name);
+    }
+    g_listPicked = false;
+    buildNameList(popup, name);
+    g_teleporterPopup = FWeakObjectPtr(popup); // from here on UpdateText indexes the name list
+}
+
+// Options built by buildNameList show "<name> (<count>)" instead of "{num} - {name}".
+static void post_TagOptionConstruct(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    for (const OptionLabel& o : g_optionLabels) {
+        if (o.option.Get() == Ctx.Context) {
+            setOptionLabel(Ctx.Context, o.label);
+            return;
+        }
+    }
+}
+
+// Vanilla UpdateText writes the tag of CurrentIndex into the text line. Once
+// the name list is up, the index is a list index: write that name instead. Typing
+// can trigger d-pad navigation (keybinds bubble up from the text box); keep the
+// typed text then.
+static void pre_TeleporterPopupUpdateText(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    UpdateTextFrame frame{false, false, {}};
+    if (g_config.nameableTeleporters) {
+        frame.listActive = Ctx.Context == g_teleporterPopup.Get();
+        UObject* textBox = getObjectProperty(Ctx.Context, STR("TextBox_Line"));
+        if (textBox && (frame.listActive || calledFrom(Ctx, L"WidgetAction_DPadDirection"))) {
+            frame.text = getWidgetText(textBox);
+            if (calledFrom(Ctx, L"WidgetAction_DPadDirection")) {
+                CallParams focus{textBox, STR("HasKeyboardFocus")};
+                focus.call();
+                frame.keepTyped = focus.retBool();
+            }
+        }
+    }
+    g_updateTextStash.push_back(frame);
+}
+
+static void post_TeleporterPopupUpdateText(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    if (g_updateTextStash.empty()) {
+        return;
+    }
+    const UpdateTextFrame frame = g_updateTextStash.back();
+    g_updateTextStash.pop_back();
+    if (!g_config.nameableTeleporters) {
+        return;
+    }
+    UObject* textBox = getObjectProperty(Ctx.Context, STR("TextBox_Line"));
+    if (!textBox) {
+        return;
+    }
+    if (frame.keepTyped) {
+        setWidgetText(textBox, frame.text);
+        return;
+    }
+    if (!frame.listActive) {
+        g_lastTagText = getWidgetText(textBox); // the opening UpdateText: the pad's tag
+        return;
+    }
+    const int32_t index = getIntParam(Ctx, L"CurrentIndex");
+    if (index >= 0 && index < static_cast<int32_t>(g_listNames.size())) {
+        setWidgetText(textBox, g_listNames[static_cast<size_t>(index)]);
+        g_listPicked = true;
+    } else {
+        setWidgetText(textBox, frame.text);
+    }
+}
+
+// Accept: a text line that isn't the tag vanilla wrote is a custom name. Point
+// the popup's CurrentIndex at the name's id, so the vanilla RPC already links
+// the pad by name (even on a host without the mod), then send the name itself.
+static void pre_PadYesClicked(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    g_pendingName.clear();
+    if (!g_config.nameableTeleporters) {
+        return;
+    }
+    UObject* popup = g_teleporterPopup.Get();
+    UObject* textBox = getObjectProperty(popup, STR("TextBox_Line"));
+    int32_t* index = popupCurrentIndex(popup);
+    if (!textBox || !index) {
+        return;
+    }
+    const std::wstring raw = getWidgetText(textBox);
+    const std::wstring name = tn::normalizeName(raw);
+    if (name.empty() || (!g_listPicked && tn::equalsIgnoreCase(tn::normalizeName(g_lastTagText), name))) {
+        return; // the pad's tag, untouched: vanilla path
+    }
+    *index = tn::nameToId(name);
+    g_pendingName = name;
+    g_pendingNamePad = FWeakObjectPtr(Ctx.Context);
+}
+
+static void post_PadYesClicked(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    if (g_pendingName.empty() || g_pendingNamePad.Get() != Ctx.Context) {
+        return;
+    }
+    const std::wstring name = g_pendingName;
+    g_pendingName.clear();
+    CallParams owner{g_teleporterPopup.Get(), STR("GetOwningPlayerPawn")};
+    owner.call();
+    CallParams rpc{owner.retObject(), STR("Request_UpdateStringContent")};
+    if (!rpc) {
+        return;
+    }
+    rpc.setString(tn::encodeNameMessage(name));
+    rpc.setObject(Ctx.Context);
+    rpc.call();
+    log(L"teleporter: sent name '" + name + L"'");
+}
+
+// Server: "<id>:<name>" stores the name and hands vanilla the plain id; a plain
+// id that isn't the stored name's (a tag pick) clears the name.
+static void pre_PadDeliverString(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    if (!g_config.nameableTeleporters) {
+        return;
+    }
+    FString* param = nullptr;
+    if (UFunction* fn = Ctx.TheStack.Node()) {
+        for (FProperty* prop : TFieldRange<FProperty>(fn, EFieldIterationFlags::IncludeDeprecated)) {
+            if (prop->GetName() == L"String" && CastField<FStrProperty>(prop)) {
+                param = prop->ContainerPtrToValuePtr<FString>(Ctx.TheStack.Locals());
+                break;
+            }
+        }
+    }
+    UObject* pad = Ctx.Context;
+    if (!param || !padNameField(pad)) {
+        return;
+    }
+    const std::wstring msg(**param);
+    std::wstring name;
+    int32_t id = 0;
+    if (tn::decodeNameMessage(msg, name)) {
+        setPadName(pad, name);
+        *param = FString(std::to_wstring(tn::nameToId(name)).c_str());
+        markChangeableDirty(pad);
+        log(L"teleporter: named '" + name + L"'");
+    } else if (tn::parsePlainId(msg, id)) {
+        const std::wstring current = getPadName(pad);
+        if (!current.empty() && id != tn::nameToId(current)) {
+            setPadName(pad, L"");
+            markChangeableDirty(pad);
+            log(L"teleporter: name cleared (tag " + msg + L")");
+        }
+    }
+}
+
+// Vanilla OnLoadedFromSave runs AttemptSaveUpgrade on any non-empty
+// PlayerMadeString, which turns the name into a tag. Hide the name for the call,
+// then restore it and make sure the frequency matches it.
+struct PadLoadStash {
+    UObject* pad;
+    std::wstring name;
+};
+static std::vector<PadLoadStash> g_padLoadStash;
+
+static void pre_PadOnLoadedFromSave(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    PadLoadStash frame{Ctx.Context, {}};
+    if (g_config.nameableTeleporters) {
+        frame.name = getPadName(Ctx.Context);
+        if (!frame.name.empty()) {
+            setPadName(Ctx.Context, L"");
+        }
+    }
+    g_padLoadStash.push_back(frame);
+}
+
+static void post_PadOnLoadedFromSave(UnrealScriptFunctionCallableContext&, void*) {
+    if (g_padLoadStash.empty()) {
+        return;
+    }
+    const PadLoadStash frame = g_padLoadStash.back();
+    g_padLoadStash.pop_back();
+    const std::wstring name = tn::normalizeName(frame.name);
+    if (name.empty() || !getPadName(frame.pad).empty()) {
+        return;
+    }
+    setPadName(frame.pad, name);
+    const int32_t id = tn::nameToId(name);
+    int32_t frequency = 0;
+    if (!getPadFrequency(frame.pad, frequency) || frequency != id) {
+        setPadLocationId(frame.pad, id); // e.g. a pre-1.0 pad that was never upgraded
+    }
+    markChangeableDirty(frame.pad);
+    log(L"teleporter: loaded '" + name + L"'");
+}
+
+// "<ItemName> (<LocationName>)", as vanilla formats tags.
+static void post_PadGetItemNameText(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    if (!g_config.nameableTeleporters) {
+        return;
+    }
+    const std::wstring name = getActivePadName(Ctx.Context);
+    UFunction* fn = Ctx.TheStack.Node();
+    if (name.empty() || !fn) {
+        return;
+    }
+    FProperty* retProp = nullptr;
+    for (FProperty* prop : TFieldRange<FProperty>(fn, EFieldIterationFlags::IncludeDeprecated)) {
+        if (prop->HasAnyPropertyFlags(CPF_ReturnParm)) {
+            retProp = prop;
+        }
+    }
+    if (!CastField<FTextProperty>(retProp)) {
+        return;
+    }
+    void* result = Ctx.RESULT_DECL ? Ctx.RESULT_DECL : retProp->ContainerPtrToValuePtr<void>(Ctx.TheStack.Locals());
+    std::wstring text = static_cast<FText*>(result)->ToString();
+    text.erase(text.find_last_not_of(L' ') + 1); // vanilla leaves "{ItemName} " without a tag
+    FText replaced((text + L" (" + name + L")").c_str());
+    retProp->CopyCompleteValue(result, &replaced);
+}
+
 bool tryInit(const TweakConfig& config) {
     g_config = config;
     if (g_playerClass) {
@@ -900,5 +1738,16 @@ int registerHooks() {
     count += registerHook(kStartAttachTrinketPath, pre_StartAttachTrinket, post_StartAttachTrinket);
     FSoftObjectPath(FString(kTransmogSlotClassPath)).TryLoad();
     count += registerHook(kTransmogSlotEmptyClickPath, pre_TransmogSlotEmptyClicked, nullptr);
+    FSoftObjectPath(FString(kPadClassPath)).TryLoad();
+    count += registerHook(kPadDeliverStringPath, pre_PadDeliverString, nullptr);
+    count += registerHook(kPadOnLoadedFromSavePath, pre_PadOnLoadedFromSave, post_PadOnLoadedFromSave);
+    count += registerHook(kPadGetItemNameTextPath, nullptr, post_PadGetItemNameText);
+    count += registerHook(kPadInteractPath, pre_PadInteract, nullptr);
+    count += registerHook(kPadYesClickedPath, pre_PadYesClicked, post_PadYesClicked);
+    FSoftObjectPath(FString(kTeleporterPopupClassPath)).TryLoad();
+    count += registerHook(kTeleporterPopupConstructPath, pre_TeleporterPopupConstruct, post_TeleporterPopupConstruct);
+    count += registerHook(kTeleporterPopupUpdateTextPath, pre_TeleporterPopupUpdateText, post_TeleporterPopupUpdateText);
+    FSoftObjectPath(FString(kTagOptionClassPath)).TryLoad();
+    count += registerHook(kTagOptionConstructPath, nullptr, post_TagOptionConstruct);
     return count;
 }

@@ -23,6 +23,7 @@ const TweakConfig kDefaultTweaks = {
     /*disableWatchLight =*/false,
     /*wishingShelfTopUp =*/true,
     /*transmogHideSuitAndBackpack =*/true,
+    /*nameableTeleporters =*/true,
 };
 
 namespace {
@@ -99,6 +100,8 @@ void parseAssignment(const std::wstring& line, TweakConfig& cfg, bool inTweaks) 
         cfg.wishingShelfTopUp = (value == L"true");
     } else if (key == L"transmogHideSuitAndBackpack") {
         cfg.transmogHideSuitAndBackpack = (value == L"true");
+    } else if (key == L"nameableTeleporters") {
+        cfg.nameableTeleporters = (value == L"true");
     }
 }
 
@@ -146,6 +149,8 @@ bool writeDefaultConfig(const std::wstring& path) {
         << L",  -- also fill a stocked stocking slot when it already holds the shelf slot's item\n";
     out << L"  transmogHideSuitAndBackpack = " << (kDefaultTweaks.transmogHideSuitAndBackpack ? L"true" : L"false")
         << L",  -- full suit and backpack can be hidden via their empty dresser slots, like other armor\n";
+    out << L"  nameableTeleporters = " << (kDefaultTweaks.nameableTeleporters ? L"true" : L"false")
+        << L",  -- type any name into the teleporter pad tag box; pads with the same name link\n";
     out << L"\n  player = {\n";
     for (const auto& f : kOptionalFields) {
         const double v = (kDefaultTweaks.*(f.field)).value();
