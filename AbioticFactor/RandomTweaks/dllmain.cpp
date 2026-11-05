@@ -53,7 +53,7 @@ class RandomTweaks : public RC::CppUserModBase {
 public:
     RandomTweaks() : CppUserModBase() {
         ModName = STR("RandomTweaks");
-        ModVersion = STR("1.2.0");
+        ModVersion = STR("1.3.0");
         ModDescription = STR("Random tweaks");
         ModAuthors = STR("WhitePhantom02");
     }
