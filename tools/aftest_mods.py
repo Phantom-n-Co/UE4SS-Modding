@@ -58,9 +58,9 @@ def digest(path):
 
 
 def ue4ss_mod_name(modlist):
-    names = [line[1:] for line in modlist if line[:1] in "+-" and line[1:].startswith("UE4SS v")]
+    names = [line[1:] for line in modlist if line[:1] == "+" and line[1:].startswith("UE4SS v")]
     if len(names) != 1:
-        raise ModsError(f"expected exactly one 'UE4SS v...' mod in the default modlist, found {names}")
+        raise ModsError(f"expected exactly one enabled 'UE4SS v...' mod in the default modlist, found {names}")
     return names[0]
 
 
@@ -136,7 +136,24 @@ def ours():
     return bool(m) and m.get("deployed_sha256") == digest(DEPLOYED)
 
 
+def amethyst_gui_running():
+    """The Amethyst GUI redeploys the active profile on start, so it would swap the files of
+    a running test (seen: it redeployed `default` under a running aftest session)."""
+    out = subprocess.run(["ps", "-eo", "args="], capture_output=True, text=True).stdout
+    # Match the executable (argv[0], or argv[1] under a python interpreter), not any command line
+    # that merely mentions it (shells running this tool would match a substring test).
+    for line in out.splitlines():
+        argv = line.split()
+        if argv and argv[0].rsplit("/", 1)[-1].startswith("python"):
+            argv = argv[1:]
+        if argv and argv[0].rsplit("/", 1)[-1] == "amethyst-mod-manager":
+            return True
+    return False
+
+
 def use(*mods):
+    if amethyst_gui_running():
+        raise ModsError("the Amethyst GUI is open; close it first (it redeploys profiles on its own)")
     wanted = set(mods) | ALWAYS
     m = marker()
     if m and ours() and set(m["mods"]) == wanted and deployed_mods() == wanted:
