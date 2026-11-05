@@ -168,7 +168,7 @@ UObject* firstLive(const std::wstring& className) {
     return live.empty() ? nullptr : live.front();
 }
 
-// "player" | "pc" | "first:<ClassName>" | full object path ("/Game/....Name"),
+// "player" | "pc" | "first:<ClassName>" | "named:<ClassName>:<ObjectName>" | full object path ("/Game/....Name"),
 // optionally followed by "->Prop" steps that follow object properties
 // (e.g. "first:W_HostGameSetup_C->TextInput_WorldName").
 UObject* resolveBase(const std::wstring& target) {
@@ -180,6 +180,20 @@ UObject* resolveBase(const std::wstring& target) {
     }
     if (target.starts_with(L"first:")) {
         return firstLive(target.substr(6));
+    }
+    if (target.starts_with(L"named:")) {
+        // named:<ClassName>:<ObjectName>, for objects whose paths can't be looked up (widgets)
+        const size_t colon = target.find(L':', 6);
+        if (colon == std::wstring::npos) {
+            return nullptr;
+        }
+        const std::wstring objName = target.substr(colon + 1);
+        for (UObject* obj : liveInstances(target.substr(6, colon - 6))) {
+            if (obj->GetName() == objName) {
+                return obj;
+            }
+        }
+        return nullptr;
     }
     return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, target.c_str());
 }
@@ -394,6 +408,15 @@ bool importValue(FProperty* prop, void* at, const std::wstring& value, UObject* 
     }
     if (!plainValueValid(prop, value)) {
         return false;
+    }
+    // Object params: ImportText finds no actors/widgets by path here (and resolves
+    // short names like "player" to unrelated classes), so the bridge's own target
+    // syntax (player, pc, first:<Class>, paths, ->Prop) goes first.
+    if (auto* objProp = CastField<FObjectProperty>(prop); objProp && !CastField<FClassProperty>(prop)) {
+        if (UObject* target = value == L"None" ? nullptr : resolveTarget(value)) {
+            objProp->SetObjectPropertyValue(at, target);
+            return true;
+        }
     }
     const wchar_t* end = prop->ImportText_Direct(value.c_str(), at, owner, 0, nullptr);
     return end && (value.empty() || end != value.c_str());
