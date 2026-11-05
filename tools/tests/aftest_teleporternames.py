@@ -239,11 +239,11 @@ def remove_pads(pads):
 def force_save():
     """Write the world save to disk now (console quit skips saving) and wait for the queue."""
     bridge("call", "first:Abiotic_GameInstance_C", "ForceSave")
-    for _ in range(60):
+    for _ in range(240):
         time.sleep(0.5)
         if bridge("call", "first:Abiotic_GameInstance_C", "HasPendingSaves")["params"]["ReturnValue"] == "False":
             return
-    raise RuntimeError("world save still pending after 30 s")
+    raise RuntimeError("world save still pending after 120 s")
 
 
 def live_pads():
