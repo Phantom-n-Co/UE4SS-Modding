@@ -1,0 +1,9 @@
+All Rights Reserved — except where noted below.
+
+Unless otherwise indicated, all files in this repository (build scripts, tooling, configuration, documentation) are © 2025–2026 Phantom and all rights are reserved. No license is granted to copy, modify, or distribute them.
+
+Submodule dependencies carry their own licenses:
+
+- RE-UE4SS (`RE-UE4SS/`) — MIT License (© 2022 Narknon). See the submodule's LICENSE file for terms.
+
+Individual mod directories contain their own LICENSE files; those govern the source code in those folders only.
