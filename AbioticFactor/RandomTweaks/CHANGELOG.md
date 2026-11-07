@@ -1,5 +1,11 @@
 # RandomTweaks changelog
 
+## 1.4.0
+- Instant butcher reworked: a corpse now pops on the first hit from a weapon that can gib, instead of enemies gibbing on any damage.
+- Living enemies and the killing blow are never gibbed — the death and ragdoll play out as usual.
+- Weapons that cannot gib (blunt damage types) leave the body intact, as in vanilla.
+- Built against UE4SS 3.0.1 (commit d4aebbf0).
+
 ## 1.3.0
 - Nameable teleporter pads: type any name into the pad's tag box; pads with the same name link (case-insensitive, up to 32 characters). Config key: nameableTeleporters.
 - The pad's tag menu lists the names in use, with the number of pads per name, instead of the premade tags.

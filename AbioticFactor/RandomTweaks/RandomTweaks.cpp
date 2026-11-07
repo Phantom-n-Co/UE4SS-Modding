@@ -30,6 +30,8 @@ static const wchar_t* kPlayerClassPath =
     L"/Game/Blueprints/Characters/Abiotic_PlayerCharacter.Abiotic_PlayerCharacter_C";
 static const wchar_t* kBeginPlayPath =
     L"/Game/Blueprints/Characters/Abiotic_PlayerCharacter.Abiotic_PlayerCharacter_C:ReceiveBeginPlay";
+static const wchar_t* kCorpseDamagePath =
+    L"/Game/Blueprints/Environment/Special/CharacterCorpse_ParentBP.CharacterCorpse_ParentBP_C:ReceivePointDamage";
 static const wchar_t* kProcessDamagePath =
     L"/Game/Blueprints/Characters/Abiotic_Character_ParentBP.Abiotic_Character_ParentBP_C:ProcessDamage";
 static const wchar_t* kIsInventorySlotEmptyPath =
@@ -456,19 +458,56 @@ static UObject* getShelfFor(UObject* stocking) {
     return shelf;
 }
 
-static void pre_ProcessDamage(UnrealScriptFunctionCallableContext& Ctx, void*) {
+static bool readBoolProp(UObject* obj, const wchar_t* name) {
+    if (!obj) {
+        return false;
+    }
+    FProperty* prop = obj->GetPropertyByNameInChain(name);
+    auto* boolProp = CastField<FBoolProperty>(prop);
+    return boolProp && boolProp->GetPropertyValueInContainer(obj);
+}
+
+static int32_t readIntProp(UObject* obj, const wchar_t* name) {
+    if (!obj) {
+        return 0;
+    }
+    FProperty* prop = obj->GetPropertyByNameInChain(name);
+    auto* intProp = CastField<FIntProperty>(prop);
+    return intProp ? intProp->GetPropertyValueInContainer(obj) : 0;
+}
+
+// Vanilla gibs a corpse on the fifth cut from a damage type that can gib.
+static void pre_CorpseDamage(UnrealScriptFunctionCallableContext& Ctx, void*) {
     if (!g_config.instantButcher) {
+        return;
+    }
+    UObject* corpse = Ctx.Context;
+    if (!corpse) {
+        return;
+    }
+    const bool canBeGibbed = readBoolProp(corpse, STR("CanBeGibbed"));
+    const bool gibbed = readBoolProp(corpse, STR("IsGibbed"));
+    if (!canBeGibbed || gibbed) {
+        log(L"butcher: '" + corpse->GetName() + L"' skipped (CanBeGibbed=" +
+            std::to_wstring(canBeGibbed) + L", IsGibbed=" + std::to_wstring(gibbed) + L")");
         return;
     }
     UObject* damageType = getObjectParam(Ctx, L"DamageType");
     if (!damageType) {
         return;
     }
-    if (FProperty* prop = damageType->GetPropertyByNameInChain(STR("InstantGibType"))) {
-        if (auto* b = CastField<FBoolProperty>(prop)) {
-            b->SetPropertyValueInContainer(damageType, true);
-        }
+    FProperty* prop = damageType->GetPropertyByNameInChain(STR("CanGib"));
+    auto* canGib = CastField<FBoolProperty>(prop);
+    if (!canGib || !canGib->GetPropertyValueInContainer(damageType)) {
+        log(L"butcher: '" + corpse->GetName() + L"' not cut by '" + damageType->GetName() +
+            L"' (CanGib=false)");
+        return;
     }
+    const int32_t maxCuts = readIntProp(corpse, STR("MaxGibCuts"));
+    const int32_t cuts = readIntProp(corpse, STR("CurrentGibCuts"));
+    setScalarProp(corpse, STR("CurrentGibCuts"), maxCuts > 0 ? maxCuts : 1);
+    log(L"butcher: '" + corpse->GetName() + L"' cuts " + std::to_wstring(cuts) + L" -> " +
+        std::to_wstring(maxCuts > 0 ? maxCuts : 1) + L" by '" + damageType->GetName() + L"'");
 }
 
 static void pre_ReceiveBeginPlay(UnrealScriptFunctionCallableContext& Ctx, void*) {
@@ -973,6 +1012,60 @@ struct CallParams {
         return CastField<FTextProperty>(prop) ? static_cast<FText*>(at(prop))->ToString() : std::wstring{};
     }
 };
+
+// Monster bodies stay the character; vanilla gibs one only after enough post-death
+// damage. The stack remembers IsDead from before each call: a killing blow sets it
+// mid-call and must not count as post-death damage.
+static bool g_gibbing = false;
+
+struct DamageFrame {
+    bool deadBefore = false;
+};
+static std::vector<DamageFrame> g_damageStack;
+
+static void pre_ProcessDamage(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    g_damageStack.push_back({readBoolProp(Ctx.Context, STR("IsDead"))});
+}
+
+static void post_ProcessDamage(UnrealScriptFunctionCallableContext& Ctx, void*) {
+    if (g_damageStack.empty()) {
+        return;
+    }
+    const DamageFrame frame = g_damageStack.back();
+    g_damageStack.pop_back();
+    if (!g_config.instantButcher || g_gibbing || !Ctx.Context || !frame.deadBefore ||
+        readBoolProp(Ctx.Context, STR("IsGibbed"))) {
+        return;
+    }
+    UObject* damageType = getObjectParam(Ctx, L"DamageType");
+    if (!damageType) {
+        return;
+    }
+    auto* canGib = CastField<FBoolProperty>(damageType->GetPropertyByNameInChain(STR("CanGib")));
+    if (!canGib || !canGib->GetPropertyValueInContainer(damageType)) {
+        return;
+    }
+    CallParams call(Ctx.Context, L"TryGibbingNPC");
+    if (!call) {
+        return;
+    }
+    UObject* attacker = getObjectParam(Ctx, L"Instigator");
+    for (FProperty* prop : call.props) {
+        auto* objProp = CastField<FObjectPropertyBase>(prop);
+        auto* boolProp = CastField<FBoolProperty>(prop);
+        if (objProp && prop->GetName() == STR("DamageType")) {
+            objProp->SetObjectPropertyValue(call.at(prop), damageType);
+        } else if (objProp && prop->GetName() == STR("Attacker")) {
+            objProp->SetObjectPropertyValue(call.at(prop), attacker);
+        } else if (boolProp && prop->GetName() == STR("ForceGibNPC")) {
+            boolProp->SetPropertyValue(call.at(prop), true);
+        }
+    }
+    g_gibbing = true;
+    call.call();
+    g_gibbing = false;
+    log(L"butcher: gibbed dead '" + Ctx.Context->GetName() + L"' with '" + damageType->GetName() + L"'");
+}
 
 // A ChangeableData struct value: of a live deployable or of a world-save entry.
 struct ChangeableRef {
@@ -1722,7 +1815,8 @@ static bool registerHook(const wchar_t* fullName,
 
 int registerHooks() {
     int count = 0;
-    count += registerHook(kProcessDamagePath, pre_ProcessDamage, nullptr);
+    count += registerHook(kCorpseDamagePath, pre_CorpseDamage, nullptr);
+    count += registerHook(kProcessDamagePath, pre_ProcessDamage, post_ProcessDamage);
     count += registerHook(kBeginPlayPath, pre_ReceiveBeginPlay, nullptr);
     count += registerHook(
         STR("/Game/Blueprints/Characters/Abiotic_PlayerCharacter.Abiotic_PlayerCharacter_C:LocalUpdateWalkSpeed"),

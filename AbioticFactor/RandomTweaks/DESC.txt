@@ -3,7 +3,7 @@
 [center]A handful of quality-of-life tweaks: instant butchering, a wish-list stocking top-up for the Wishing Shelf, hiding the full suit and backpack through transmog, custom teleporter pad names, and configurable player stat adjustments.[/center]
 
 [size=5][b]Requirements[/b][/size]
-Built against UE4SS 3.0.1 (commit 1ba38db4) for Abiotic Factor 1.5.0 (Modding Update).
+Built against UE4SS 3.0.1 (commit d4aebbf0) for Abiotic Factor 1.5.0 (Modding Update).
 
 [size=5][b]Installation[/b][/size]
 [list=1]
@@ -19,7 +19,7 @@ On the first run the mod writes a default config. Delete [font=courier]config.lu
 [size=5][b]Features[/b][/size]
 
 [size=4][b]Instant Butcher[/b][/size]
-Every damage event with a valid damage type gibs the target instantly.
+Corpses pop on the first hit from a weapon that can gib.
 
 [size=4][b]Wishing Shelf Top-Up[/b][/size]
 When the Wishing Shelf spawns gifts, a stocked stocking slot that already holds the same item as the shelf slot is topped up to its max stack instead of being left alone. The amount is rolled from the same quantity range the shelf uses, and items gated behind world flags stay gated.
