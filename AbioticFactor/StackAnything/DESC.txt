@@ -3,7 +3,7 @@
 [center]Modify any items to stack to any amount you wish, be it furniture, fish, deployable, or anything else. Fully configurable via regular expressions.[/center]
 
 [size=5][b]Requirements[/b][/size]
-Built against UE4SS 3.0.1 (commit 1ba38db4) for Abiotic Factor 1.5.0 (Modding Update).
+Built against UE4SS 3.0.1 (commit d4aebbf0) for Abiotic Factor 1.5.0 (Modding Update).
 
 [size=5][b]Installation[/b][/size]
 [list=1]

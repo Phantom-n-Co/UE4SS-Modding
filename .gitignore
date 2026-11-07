@@ -10,7 +10,9 @@ AbioticFactor/AbioticFactor
 xwin/
 .xwin-cache/
 CMakeUserPresets.json
+# Game reference dumps
 AbioticFactor/BPDecomp/
+UE4SS_SDK/
 __pycache__/
 
 # Local bug repros (repro mods + their live tests)
