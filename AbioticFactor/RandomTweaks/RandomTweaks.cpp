@@ -17,6 +17,7 @@
 #include <Unreal/Core/Containers/Map.hpp>
 #include "teleporter_names.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -1476,6 +1477,103 @@ static void setOptionLabel(UObject* option, const std::wstring& label) {
     }
 }
 
+// ---- Tag list height ----
+// Vanilla sizes the list for its 26 premade tags: Scrollbox_Options sits in a SizeBox
+// (HeightOverride 650) inside a fixed-size popup frame (Border_0, CanvasPanelSlot
+// 560 x 804.628), so a short name list leaves most of the popup empty. Both are shrunk
+// to the rows actually shown, at most kMaxListRows. Measured live: one option row is
+// 46.125 units tall including the 5-unit slot padding both vanilla and this mod apply
+// to the options, plus the scrollbox's 10+10 slot padding and 1 unit of slack so a
+// fitted list never scrolls by a rounding pixel.
+static constexpr float kOptionRowHeight = 46.125f;
+static constexpr float kListPadding = 21.f;
+static constexpr size_t kMaxListRows = 8;
+
+static UObject* widgetSlot(UObject* widget) {
+    return getObjectProperty(widget, STR("Slot"));
+}
+
+static UObject* parentWidget(UObject* widget) {
+    return getObjectProperty(widgetSlot(widget), STR("Parent"));
+}
+
+// FAnchorData::Offsets (FMargin) field of a CanvasPanelSlot. The frame's slot is
+// point-anchored, so Offsets.Right is its width and Offsets.Bottom its height.
+static float* canvasSlotOffset(UObject* canvasSlot, const wchar_t* field) {
+    auto* layout = CastField<FStructProperty>(
+        canvasSlot ? canvasSlot->GetPropertyByNameInChain(STR("LayoutData")) : nullptr);
+    auto* offsets = layout && layout->GetStruct()
+                        ? CastField<FStructProperty>(layout->GetStruct()->GetPropertyByNameInChain(STR("Offsets")))
+                        : nullptr;
+    auto* prop = offsets && offsets->GetStruct()
+                     ? CastField<FFloatProperty>(offsets->GetStruct()->GetPropertyByNameInChain(field))
+                     : nullptr;
+    if (!prop) {
+        return nullptr;
+    }
+    void* anchorData = layout->ContainerPtrToValuePtr<void>(canvasSlot);
+    return prop->ContainerPtrToValuePtr<float>(offsets->ContainerPtrToValuePtr<void>(anchorData));
+}
+
+// Sets an FVector2D UFunction param (double members in UE5, float before).
+static void setVector2Param(FProperty* prop, void* value, float x, float y) {
+    auto* vector = CastField<FStructProperty>(prop);
+    UStruct* type = vector ? vector->GetStruct() : nullptr;
+    if (!type) {
+        return;
+    }
+    for (const wchar_t* axis : {L"X", L"Y"}) {
+        FProperty* member = type->GetPropertyByNameInChain(axis);
+        if (!member) {
+            return;
+        }
+        void* atValue = member->ContainerPtrToValuePtr<void>(value);
+        const float v = axis[0] == L'X' ? x : y;
+        if (member->IsA<FDoubleProperty>()) {
+            *static_cast<double*>(atValue) = v;
+        } else if (member->IsA<FFloatProperty>()) {
+            *static_cast<float*>(atValue) = v;
+        }
+    }
+}
+
+// List region and popup frame to `count` rows, and the scrollbar only while the list overflows
+// (vanilla forces it on with AlwaysShowScrollbar, read by the Slate widget at build time, so
+// the UMG setter is needed here, not a property write).
+static void fitNameListHeight(UObject* scroll, size_t count) {
+    const size_t rows = std::clamp<size_t>(count, 1, kMaxListRows);
+    const float newList = std::ceil(kOptionRowHeight * static_cast<float>(rows)) + kListPadding;
+    UObject* sizeBox = parentWidget(scroll);
+    UObject* frameSlot = parentWidget(parentWidget(sizeBox));
+    frameSlot = widgetSlot(frameSlot);
+    auto* heightProp = CastField<FFloatProperty>(
+        sizeBox ? sizeBox->GetPropertyByNameInChain(STR("HeightOverride")) : nullptr);
+    float* width = canvasSlotOffset(frameSlot, STR("Right"));
+    float* height = canvasSlotOffset(frameSlot, STR("Bottom"));
+    if (!heightProp || !width || !height || *height <= 0.f) {
+        log(L"teleporter: unexpected tag list layout, popup keeps its vanilla size");
+        return;
+    }
+    CallParams bar{scroll, STR("SetAlwaysShowScrollbar")};
+    bar.setBool(false);
+    bar.call();
+    CallParams setList{sizeBox, STR("SetHeightOverride")};
+    auto* heightParam = CastField<FFloatProperty>(setList.input<FFloatProperty>());
+    if (!heightParam) {
+        return;
+    }
+    const float oldList = heightProp->GetPropertyValueInContainer(sizeBox);
+    *static_cast<float*>(setList.at(heightParam)) = newList;
+    setList.call();
+    CallParams setFrame{frameSlot, STR("SetSize")};
+    if (auto* sizeParam = setFrame.input<FStructProperty>()) {
+        setVector2Param(sizeParam, setFrame.at(sizeParam), *width, *height + (newList - oldList));
+        setFrame.call();
+    }
+    log(L"teleporter: tag list with " + std::to_wstring(count) + L" name(s), " +
+        std::to_wstring(rows) + L" row(s) shown");
+}
+
 // Replaces the tag options vanilla just built with one option per pad name.
 static void buildNameList(UObject* popup, const std::wstring& currentName) {
     UObject* scroll = getObjectProperty(popup, STR("Scrollbox_Options"));
@@ -1541,6 +1639,7 @@ static void buildNameList(UObject* popup, const std::wstring& currentName) {
         }
     }
     log(L"teleporter: name list with " + std::to_wstring(names.size()) + L" name(s)");
+    fitNameListHeight(scroll, names.size());
 }
 
 static void post_TeleporterPopupConstruct(UnrealScriptFunctionCallableContext& Ctx, void*) {

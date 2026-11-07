@@ -14,6 +14,7 @@ box), the popup's look, a multiplayer client with/without the mod.
 
   tools/tests/aftest_teleporternames.py [--no-reload]
 """
+import math
 import re
 import sys
 import time
@@ -155,6 +156,42 @@ def popup_options(popup):
         m = re.fullmatch(r'INVTEXT\("(.*)"\)', label)
         out.append((target, m.group(1) if m else label, bridge("get", target, "bIsEnabled")["value"] == "True"))
     return out
+
+
+# The popup is a fixed-size frame (Border_0, 560 x 804.628) with the list in a SizeBox
+# (vanilla HeightOverride 650, sized for the 26 tags); the mod shrinks both to the names
+# shown. One option row is 46.125 units tall (5 units are the slot padding the popup
+# applies to every option), plus 21 for the scrollbox slot padding and rounding slack.
+LIST_SIZE_BOX = "->Scrollbox_Options->Slot->Parent"
+LIST_FRAME_SLOT = "->Scrollbox_Options->Slot->Parent->Slot->Parent->Slot->Parent->Slot"
+VANILLA_LIST = 650.0
+VANILLA_FRAME = 804.628235
+OPTION_ROW = 46.125
+LIST_PADDING = 21.0
+MAX_ROWS = 8
+
+
+def list_fit(popup):
+    """(list HeightOverride, frame height, scroll extent, AlwaysShowScrollbar)."""
+    list_h = float(bridge("get", popup + LIST_SIZE_BOX, "HeightOverride")["value"])
+    data = bridge("get", popup + LIST_FRAME_SLOT, "LayoutData")["value"]
+    frame = float(re.search(r"Bottom=([\d.]+)", data).group(1))
+    end = float(bridge("call", f"{popup}->Scrollbox_Options", "GetScrollOffsetOfEnd")["params"]["ReturnValue"])
+    always = bridge("get", f"{popup}->Scrollbox_Options", "AlwaysShowScrollbar")["value"]
+    return list_h, frame, end, always
+
+
+def check_list_fit(popup, names, label):
+    """List region and popup frame sized for min(names, MAX_ROWS) rows, no scrolling of a full list."""
+    rows = min(max(names, 1), MAX_ROWS)
+    want_list = math.ceil(OPTION_ROW * rows) + LIST_PADDING
+    want_frame = VANILLA_FRAME - VANILLA_LIST + want_list
+    list_h, frame, end, always = list_fit(popup)
+    check(abs(list_h - want_list) < 0.01 and abs(frame - want_frame) < 0.01,
+          f"{label}: popup sized for {rows} of {names} row(s) (list {list_h:.2f}, frame {frame:.2f};"
+          f" want {want_list:.2f}/{want_frame:.2f})")
+    check((end == 0.0) == (names <= MAX_ROWS) and always == "False",
+          f"{label}: scrollbar only when the list overflows (extent {end}, AlwaysShowScrollbar {always})")
 
 
 def click_option(popup, label):
@@ -310,6 +347,7 @@ def main():
         labels = [o[1] for o in opts]
         check(labels == ["Lab West (2)", "Old Lab (1)"], f"list shows the pad names, no tags: {labels}")
         check([o[2] for o in opts] == [True, False], f"C's own name selected (disabled): {[o[2] for o in opts]}")
+        check_list_fit(popup, len(opts), "name list")
         check(popup_text(popup) == "Old Lab", f"C popup text {popup_text(popup)!r}")
         click_option(popup, "Lab West (2)")
         check(popup_text(popup) == "Lab West", f"clicking a name fills the text line ({popup_text(popup)!r})")
@@ -360,6 +398,22 @@ def main():
         labels = [o[1] for o in popup_options(popup)]
         accept(popup, a)
         check(labels == ["Delta (2)", "Lab West (1)"], f"destroyed pad not listed: {labels}")
+        check_list_fit(popup, len(labels), "short list")
+
+        # more names than fit: the list stops at MAX_ROWS rows and scrolls
+        bulk = [spawn_pad(800 + 100 * i) for i in range(MAX_ROWS + 1 - 2)]  # 2 names are already in use
+        pads.extend(bulk)
+        time.sleep(1.0)
+        for i, pad in enumerate(bulk):
+            deliver(pad, f"{name_id(f'Zone {i + 1}')}:Zone {i + 1}")
+        popup = open_popup(a)
+        labels = [o[1] for o in popup_options(popup)]
+        check(len(labels) >= MAX_ROWS + 1, f"{MAX_ROWS + 1}+ names listed: {len(labels)} {labels}")
+        check_list_fit(popup, len(labels), "long list")
+        accept(popup, a)
+        remove_pads(bulk)
+        pads = [p for p in pads if p not in bulk]
+        time.sleep(0.5)
 
         if reload:
             force_save()

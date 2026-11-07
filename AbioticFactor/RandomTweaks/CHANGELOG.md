@@ -1,5 +1,9 @@
 # RandomTweaks changelog
 
+## 1.5.0
+- The teleporter tag menu is only as tall as its name list: it shrinks with the number of names in use and stops growing at eight rows.
+- The tag menu shows its scrollbar only when the list is longer than the rows it fits.
+
 ## 1.4.0
 - Instant butcher: corpses pop on the first hit from a weapon that can gib; living enemies and the killing blow are never gibbed.
 - Built against UE4SS 3.0.1 (d4aebbf0).

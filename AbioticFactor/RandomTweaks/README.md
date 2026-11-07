@@ -36,6 +36,8 @@ Teleporter pads can be given any name again, as before the fixed tag list. The t
 
 The premade tags are gone from the menu. The list shows the names in use instead, each with the number of pads that have it (e.g. "Main Base (2)"), so an unpaired pad stands out; click one to use it. Pads that still have a tag keep it until renamed.
 
+The menu is only as tall as its list: it shrinks with the number of names in use and stops growing at eight rows; the scrollbar shows up only when there are more names than that.
+
 - **Multiplayer** — the host (or dedicated server) needs the mod to store and show names. Players without the mod see the pad without a name. On a host without the mod, pads named by a modded player still link by name, but the name is not shown or kept. The name list of the host lists every named pad of the map; other players only see the names of pads near them (the parts of the facility currently loaded for them).
 - **Removing the mod** — on the next load the game converts the names to tags with its own upgrade for old pre-tag names. Check the pads' tags afterwards.
 
